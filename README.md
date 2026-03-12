@@ -49,3 +49,21 @@ The UI will connect to the game server at `http://<HOST_IP>:3000` automatically.
 ./npm run play
 ```
 Other laptop opens: `http://<HOST_IP>:3000`
+
+## Public Hosting Guidance
+### Recommended Persistent Option
+For a free public URL that does not require your laptop to stay on, deploy the Node server to Render.
+
+- Render web services: `https://render.com/docs/web-services`
+- Render WebSockets: `https://render.com/docs/websocket`
+- Render free tier overview: `https://render.com/docs/free`
+
+This project already fits that model because the production server serves the built client and Socket.IO from one process.
+
+### Fastest Temporary Option
+For quick remote testing without deployment, use Cloudflare Quick Tunnel while `./npm run play` is running locally.
+
+- Quick Tunnels: `https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/`
+- Cloudflare Tunnel overview: `https://developers.cloudflare.com/tunnel/`
+
+This is useful for short-lived testing, but the machine hosting the game must stay online.

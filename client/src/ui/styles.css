@@ -127,6 +127,10 @@ h1 {
   border-color: transparent;
 }
 
+.btn--quiet {
+  background: rgba(255, 255, 255, 0.58);
+}
+
 .btn.danger {
   background: rgba(185, 28, 28, 0.14);
   border-color: rgba(185, 28, 28, 0.3);
@@ -162,6 +166,89 @@ h1 {
   font-weight: 800;
   margin-bottom: 10px;
   letter-spacing: 0.01em;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.welcome {
+  display: grid;
+  gap: 18px;
+}
+
+.welcome-hero {
+  display: grid;
+  gap: 12px;
+}
+
+.welcome-eyebrow {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.welcome-title {
+  margin-bottom: 0;
+}
+
+.welcome-copy {
+  margin: 0;
+  color: var(--muted);
+  max-width: 58ch;
+}
+
+.welcome-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.welcome-option {
+  display: grid;
+  gap: 14px;
+}
+
+.welcome-option__kicker {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.welcome-option__title {
+  margin: 0;
+  font-size: 24px;
+}
+
+.welcome-option__copy {
+  margin: 0;
+  color: var(--muted);
+  min-height: 44px;
+}
+
+.welcome-option__footer {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.welcome-option__hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.inline-error {
+  font-size: 12px;
+  font-weight: 700;
+  color: #9f1239;
 }
 
 .form {
@@ -778,6 +865,10 @@ h1 {
 
 @media (max-width: 900px) {
   .grid-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .welcome-grid {
     grid-template-columns: 1fr;
   }
 }

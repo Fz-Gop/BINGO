@@ -35,7 +35,12 @@ export function App() {
       {error ? <div className="banner banner--error">{error}</div> : null}
 
       {!view ? (
-        <Welcome onCreate={actions.createRoom} onJoin={actions.joinRoom} savedName={savedName} />
+        <Welcome
+          onCreate={actions.createRoom}
+          onJoin={actions.joinRoom}
+          savedName={savedName}
+          error={error}
+        />
       ) : (
         <GameScreen view={view} actions={actions} />
       )}
@@ -46,49 +51,109 @@ export function App() {
 function Welcome({
   onCreate,
   onJoin,
-  savedName
+  savedName,
+  error
 }: {
   onCreate: (name: string) => void;
   onJoin: (code: string, name: string) => void;
   savedName: string;
+  error: string | null;
 }) {
   const [name, setName] = useState(savedName);
   const [code, setCode] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [joinError, setJoinError] = useState<string | null>(null);
+
+  function handleCreate() {
+    if (!name.trim()) {
+      setCreateError("Enter your name before creating a room.");
+      return;
+    }
+    setCreateError(null);
+    onCreate(name);
+  }
+
+  function handleJoin() {
+    if (!name.trim()) {
+      setJoinError("Enter your name before joining a room.");
+      return;
+    }
+    if (!code.trim()) {
+      setJoinError("Enter the 4-letter room code.");
+      return;
+    }
+    setJoinError(null);
+    onJoin(code, name);
+  }
 
   return (
-    <main className="card">
-      <h2 className="section-title">Start Or Join</h2>
-      <div className="form">
+    <main className="welcome">
+      <section className="card welcome-hero">
+        <div className="welcome-eyebrow">Play together from one link</div>
+        <h2 className="section-title welcome-title">Create or join a Bingo room</h2>
+        <p className="welcome-copy">
+          Start a new room and share the code, or join instantly with the 4-letter code
+          from your opponent.
+        </p>
+
         <label className="field">
-          <span>Name</span>
+          <span>Your Name</span>
           <input
             value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Player name"
+            onChange={(event) => {
+              setName(event.target.value);
+              setCreateError(null);
+              setJoinError(null);
+            }}
+            placeholder="How should the room know you?"
           />
         </label>
+      </section>
 
-        <div className="row">
-          <button className="btn primary" onClick={() => onCreate(name)}>
-            Create Room
-          </button>
-        </div>
+      <section className="welcome-grid">
+        <article className="card welcome-option">
+          <div className="welcome-option__kicker">Host</div>
+          <h3 className="welcome-option__title">Create Room</h3>
+          <p className="welcome-option__copy">
+            Start a fresh room here, then send the generated code to the other player.
+          </p>
+          <div className="welcome-option__footer">
+            <button className="btn primary" onClick={handleCreate}>
+              Create Room
+            </button>
+            <div className="welcome-option__hint">You will become Player A automatically.</div>
+            {createError ? <div className="inline-error">{createError}</div> : null}
+          </div>
+        </article>
 
-        <label className="field">
-          <span>Room Code</span>
-          <input
-            value={code}
-            onChange={(event) => setCode(event.target.value.toUpperCase())}
-            placeholder="ABCD"
-            maxLength={4}
-          />
-        </label>
-        <div className="row">
-          <button className="btn" onClick={() => onJoin(code, name)}>
-            Join Room
-          </button>
-        </div>
-      </div>
+        <article className="card welcome-option">
+          <div className="welcome-option__kicker">Guest</div>
+          <h3 className="welcome-option__title">Join Room</h3>
+          <p className="welcome-option__copy">
+            Enter the 4-letter code shared by the host to join the exact room.
+          </p>
+          <label className="field">
+            <span>Room Code</span>
+            <input
+              value={code}
+              onChange={(event) => {
+                setCode(event.target.value.toUpperCase());
+                setJoinError(null);
+              }}
+              placeholder="ABCD"
+              maxLength={4}
+            />
+          </label>
+          <div className="welcome-option__footer">
+            <button className="btn" onClick={handleJoin}>
+              Join Room
+            </button>
+            <div className="welcome-option__hint">Room codes are 4 letters and case-insensitive.</div>
+            {joinError ? <div className="inline-error">{joinError}</div> : null}
+            {!joinError && error ? <div className="inline-error">{error}</div> : null}
+          </div>
+        </article>
+      </section>
     </main>
   );
 }
@@ -100,6 +165,7 @@ function GameScreen({
   view: RoomView;
   actions: {
     setReady: (ready: boolean) => void;
+    leaveRoom: (forfeit?: boolean) => void;
     confirmCall: (number: number) => void;
     requestRematch: () => void;
     respondRematch: (accept: boolean) => void;
@@ -114,6 +180,7 @@ function GameScreen({
   const [isResultModalOpen, setIsResultModalOpen] = useState(false);
   const [isIncomingRematchModalOpen, setIsIncomingRematchModalOpen] = useState(false);
   const [isForfeitConfirmOpen, setIsForfeitConfirmOpen] = useState(false);
+  const [isLeaveRoomModalOpen, setIsLeaveRoomModalOpen] = useState(false);
   const [highlightedLogId, setHighlightedLogId] = useState<string | null>(null);
   const [hasUnreadLogs, setHasUnreadLogs] = useState(false);
 
@@ -127,6 +194,7 @@ function GameScreen({
   const yourRole = view.you?.role;
   const isYourTurn = view.currentTurn === yourRole;
   const inMatch = view.status === "in_match";
+  const opponentConnected = Boolean(view.opponent?.connected && !view.opponent?.left);
   const canPlay = inMatch && !view.paused && !view.rematch && isYourTurn;
   const isBoardHot = canPlay;
   const calledSet = useMemo(() => new Set(view.calledNumbers), [view.calledNumbers]);
@@ -260,12 +328,27 @@ function GameScreen({
   );
 
   const rematchUI = getRematchUI(view, yourRole);
+  const shouldConfirmLeave = inMatch && opponentConnected && !view.paused;
+  const nextMatchBlocked = Boolean(view.opponent?.left);
+
+  function handleLeaveRequest() {
+    if (shouldConfirmLeave) {
+      setIsLeaveRoomModalOpen(true);
+      return;
+    }
+    actions.leaveRoom(false);
+  }
 
   return (
     <>
       <main className="grid-layout">
         <section className="card">
-          <div className="section-title">Players</div>
+          <div className="section-heading">
+            <div className="section-title">Players</div>
+            <button className="btn btn--quiet" onClick={handleLeaveRequest}>
+              Leave Room
+            </button>
+          </div>
           <div className="players">
             <div className={`player ${inMatch ? "player--active-match" : ""}`}>
               <div className="player-name">You: {view.you?.name}</div>
@@ -301,8 +384,16 @@ function GameScreen({
 
           {view.status !== "in_match" ? (
             <div className="row">
-              <button className="btn primary" onClick={() => actions.setReady(true)}>
-                Ready
+              <button
+                className="btn primary"
+                onClick={() => actions.setReady(true)}
+                disabled={!view.opponent || Boolean(view.opponent.left) || (view.you?.ready ?? false)}
+              >
+                {!view.opponent || view.opponent.left
+                  ? "Waiting For Opponent"
+                  : view.you?.ready
+                  ? "Waiting For Opponent"
+                  : "Ready"}
               </button>
             </div>
           ) : (
@@ -431,10 +522,16 @@ function GameScreen({
                 <div className="row">
                   <button
                     className="btn primary"
-                    onClick={() => actions.setReady(true)}
-                    disabled={view.you?.ready ?? false}
+                    onClick={() =>
+                      nextMatchBlocked ? actions.leaveRoom(false) : actions.setReady(true)
+                    }
+                    disabled={nextMatchBlocked ? false : view.you?.ready ?? false}
                   >
-                    {view.you?.ready ? "Waiting For Opponent" : "Ready For Next Match"}
+                    {nextMatchBlocked
+                      ? "Leave Room"
+                      : view.you?.ready
+                      ? "Waiting For Opponent"
+                      : "Ready For Next Match"}
                   </button>
                 </div>
               </div>
@@ -446,8 +543,17 @@ function GameScreen({
       {view.status === "ended" && isResultModalOpen ? (
         <ResultModal
           presentation={resultText}
-          onReady={() => actions.setReady(true)}
-          ready={view.you?.ready ?? false}
+          onPrimaryAction={() =>
+            nextMatchBlocked ? actions.leaveRoom(false) : actions.setReady(true)
+          }
+          primaryLabel={
+            nextMatchBlocked
+              ? "Leave Room"
+              : view.you?.ready
+              ? "Waiting For Opponent"
+              : "Ready For Next Match"
+          }
+          primaryDisabled={nextMatchBlocked ? false : view.you?.ready ?? false}
           onDismiss={() => setIsResultModalOpen(false)}
         />
       ) : null}
@@ -507,6 +613,24 @@ function GameScreen({
               </button>
               <button className="btn danger" onClick={actions.forfeitRematch}>
                 Confirm Forfeit
+              </button>
+            </>
+          }
+        />
+      ) : null}
+
+      {isLeaveRoomModalOpen ? (
+        <ActionModal
+          title="Leave room?"
+          body="If you leave now, the current match is forfeited and the point goes to your opponent."
+          dismissible={false}
+          actions={
+            <>
+              <button className="btn" onClick={() => setIsLeaveRoomModalOpen(false)}>
+                Continue
+              </button>
+              <button className="btn danger" onClick={() => actions.leaveRoom(true)}>
+                Forfeit Match And Leave
               </button>
             </>
           }
@@ -672,13 +796,15 @@ function LogCard({
 
 function ResultModal({
   presentation,
-  onReady,
-  ready,
+  onPrimaryAction,
+  primaryLabel,
+  primaryDisabled,
   onDismiss
 }: {
   presentation: ReturnType<typeof getResultPresentation>;
-  onReady: () => void;
-  ready: boolean;
+  onPrimaryAction: () => void;
+  primaryLabel: string;
+  primaryDisabled: boolean;
   onDismiss: () => void;
 }) {
   return (
@@ -701,8 +827,8 @@ function ResultModal({
         <div className="result-title">{presentation.title}</div>
         <p className="result-copy">{presentation.copy}</p>
         <div className="row">
-          <button className="btn primary" onClick={onReady} disabled={ready}>
-            {ready ? "Waiting For Opponent" : "Ready For Next Match"}
+          <button className="btn primary" onClick={onPrimaryAction} disabled={primaryDisabled}>
+            {primaryLabel}
           </button>
         </div>
       </div>
@@ -893,6 +1019,8 @@ function getLogCopy(entry: MatchLogEntry, isYou: boolean) {
       return `${isYou ? "continued the match" : "continued the match"}`;
     case "rematch-forfeited":
       return `${isYou ? "forfeited the match" : "forfeited the match"}`;
+    case "left-room":
+      return `${isYou ? "left the room" : "left the room"}`;
     case "disconnect":
       return `${isYou ? "went offline" : "went offline"}`;
     case "reconnect":
@@ -918,6 +1046,10 @@ function getPlayerStatusLabel(view: RoomView, side: "you" | "opponent") {
       : view.opponent?.ready
       ? "Ready"
       : "Not Ready";
+  }
+
+  if (side === "opponent" && view.opponent?.left) {
+    return "Left room";
   }
 
   if (view.paused) {

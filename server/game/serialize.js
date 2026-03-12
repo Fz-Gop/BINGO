@@ -15,7 +15,8 @@ export function toPlayerView(room, role) {
           name: you.name,
           role: you.role,
           ready: room.ready[role],
-          connected: you.connected
+          connected: you.connected,
+          left: you.left
         }
       : null,
     opponent: opponent
@@ -23,7 +24,8 @@ export function toPlayerView(room, role) {
           name: opponent.name,
           role: opponent.role,
           ready: room.ready[oppRole],
-          connected: opponent.connected
+          connected: opponent.connected,
+          left: opponent.left
         }
       : null,
     startingPlayer: room.startingPlayer,

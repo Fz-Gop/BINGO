@@ -27,7 +27,8 @@ export function createPlayer({ id, name, role, socketId }) {
     name,
     role,
     socketId,
-    connected: true
+    connected: true,
+    left: false
   };
 }
 
@@ -103,7 +104,14 @@ export function getCompletedLines(board, calledSet) {
 }
 
 export function canStartMatch(room) {
-  return room.players.A && room.players.B && room.ready.A && room.ready.B;
+  return (
+    room.players.A &&
+    room.players.B &&
+    !room.players.A.left &&
+    !room.players.B.left &&
+    room.ready.A &&
+    room.ready.B
+  );
 }
 
 export function startMatch(room) {

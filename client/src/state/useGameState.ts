@@ -5,6 +5,7 @@ import type { RoomView } from "./types";
 type ServerToClientEvents = {
   "room:state": (payload: { view: RoomView }) => void;
   "room:error": (payload: { message: string }) => void;
+  "room:left": () => void;
 };
 
 type ClientToServerEvents = {
@@ -12,6 +13,7 @@ type ClientToServerEvents = {
   "room:join": (payload: { code: string; playerId: string; name: string }) => void;
   "room:rejoin": (payload: { code: string; playerId: string }) => void;
   "room:ready": (payload: { ready: boolean }) => void;
+  "room:leave": (payload?: { forfeit?: boolean }) => void;
   "game:call": (payload: { number: number }) => void;
   "game:rematch:request": () => void;
   "game:rematch:respond": (payload: { accept: boolean }) => void;
@@ -39,10 +41,10 @@ function getOrCreatePlayerId() {
 }
 
 function getSocketBaseUrl() {
-  if (window.location.hostname === "localhost") {
-    return "http://localhost:3000";
+  if (window.location.port === "5173") {
+    return `${window.location.protocol}//${window.location.hostname}:3000`;
   }
-  return `${window.location.protocol}//${window.location.hostname}:3000`;
+  return window.location.origin;
 }
 
 export function useGameState() {
@@ -89,6 +91,11 @@ export function useGameState() {
     socket.on("room:error", ({ message }) => {
       setError(message);
     });
+    socket.on("room:left", () => {
+      setView(null);
+      setError(null);
+      localStorage.removeItem(ROOM_CODE_KEY);
+    });
 
     return () => {
       socket.disconnect();
@@ -111,6 +118,10 @@ export function useGameState() {
 
   function setReady(ready: boolean) {
     socket.emit("room:ready", { ready });
+  }
+
+  function leaveRoom(forfeit = false) {
+    socket.emit("room:leave", { forfeit });
   }
 
   function confirmCall(number: number) {
@@ -151,6 +162,7 @@ export function useGameState() {
       createRoom,
       joinRoom,
       setReady,
+      leaveRoom,
       confirmCall,
       requestRematch,
       respondRematch,

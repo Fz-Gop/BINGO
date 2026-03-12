@@ -13,12 +13,16 @@ import {
   startMatch
 } from "./game/logic.js";
 import {
+  clearRoomCleanup,
   createRoomForPlayer,
   detachSocket,
   findRoleBySocketId,
   joinRoom,
   listRooms,
-  rejoinRoom
+  markPlayerLeft,
+  maybeRemoveRoom,
+  rejoinRoom,
+  scheduleRoomCleanupIfIdle
 } from "./game/store.js";
 import { toPlayerView } from "./game/serialize.js";
 import { otherRole } from "./game/utils.js";
@@ -75,6 +79,10 @@ function emitState(room) {
 
 function emitError(socket, message) {
   socket.emit("room:error", { message });
+}
+
+function emitLeft(socket) {
+  socket.emit("room:left");
 }
 
 io.on("connection", (socket) => {
@@ -220,6 +228,42 @@ io.on("connection", (socket) => {
     emitState(room);
   });
 
+  socket.on("room:leave", ({ forfeit } = {}) => {
+    const { room, role, code } = locateRoomBySocket(socket.id);
+    if (!room || !role || !code) return;
+
+    const opponentRole = otherRole(role);
+    const opponentConnected = Boolean(room.players[opponentRole]?.connected);
+    const isActiveConnectedMatch =
+      room.status === "in_match" && !room.paused && opponentConnected;
+
+    if (isActiveConnectedMatch && !forfeit) {
+      emitError(socket, "Leaving now forfeits the match.");
+      return;
+    }
+
+    if (room.status === "in_match") {
+      appendLog(room, { type: "left-room", by: role });
+      if (isActiveConnectedMatch) {
+        endMatch(room, { type: "forfeit", winnerRole: opponentRole });
+      } else {
+        endMatch(room, { type: "tie" });
+      }
+    }
+
+    markPlayerLeft(room, role);
+    maybeRemoveRoom(code);
+
+    const liveRoom = getLiveRoom(code);
+    if (liveRoom) {
+      scheduleRoomCleanupIfIdle(code);
+      emitState(liveRoom);
+    } else {
+      clearRoomCleanup(code);
+    }
+    emitLeft(socket);
+  });
+
   socket.on("disconnect", () => {
     const { room, role, code } = locateRoomBySocket(socket.id);
     if (!room || !role) return;
@@ -239,6 +283,13 @@ io.on("connection", (socket) => {
     emitState(room);
   });
 });
+
+function getLiveRoom(code) {
+  for (const [roomCode, room] of listRooms()) {
+    if (roomCode === code) return room;
+  }
+  return null;
+}
 
 function locateRoomBySocket(socketId) {
   for (const [code, room] of listRooms()) {

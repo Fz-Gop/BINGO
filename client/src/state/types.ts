@@ -22,6 +22,7 @@ export type MatchLogEntry =
         | "rematch-declined"
         | "rematch-continued"
         | "rematch-forfeited"
+        | "left-room"
         | "disconnect"
         | "reconnect";
       by: Role;
@@ -58,12 +59,14 @@ export type RoomView = {
     role: Role;
     ready: boolean;
     connected: boolean;
+    left?: boolean;
   } | null;
   opponent: {
     name: string;
     role: Role;
     ready: boolean;
     connected: boolean;
+    left?: boolean;
   } | null;
   startingPlayer: Role;
   currentTurn: Role;
