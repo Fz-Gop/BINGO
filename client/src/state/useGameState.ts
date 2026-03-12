@@ -15,7 +15,9 @@ type ClientToServerEvents = {
   "game:call": (payload: { number: number }) => void;
   "game:rematch:request": () => void;
   "game:rematch:respond": (payload: { accept: boolean }) => void;
-  "game:rematch:force": () => void;
+  "game:rematch:dismiss": () => void;
+  "game:rematch:continue": () => void;
+  "game:rematch:forfeit": () => void;
   "game:tie:disconnect": () => void;
 };
 
@@ -123,8 +125,16 @@ export function useGameState() {
     socket.emit("game:rematch:respond", { accept });
   }
 
-  function forceRematch() {
-    socket.emit("game:rematch:force");
+  function dismissRematchPrompt() {
+    socket.emit("game:rematch:dismiss");
+  }
+
+  function continueRematch() {
+    socket.emit("game:rematch:continue");
+  }
+
+  function forfeitRematch() {
+    socket.emit("game:rematch:forfeit");
   }
 
   function endTieDueDisconnect() {
@@ -144,7 +154,9 @@ export function useGameState() {
       confirmCall,
       requestRematch,
       respondRematch,
-      forceRematch,
+      dismissRematchPrompt,
+      continueRematch,
+      forfeitRematch,
       endTieDueDisconnect
     },
     savedName

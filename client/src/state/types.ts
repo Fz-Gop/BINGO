@@ -6,6 +6,27 @@ export type CompletedLine = {
   index: number;
   cells: number[];
 };
+export type MatchLogEntry =
+  | {
+      id: string;
+      type: "call";
+      by: Role;
+      number: number;
+      ts: number;
+    }
+  | {
+      id: string;
+      type:
+        | "rematch-requested"
+        | "rematch-accepted"
+        | "rematch-declined"
+        | "rematch-continued"
+        | "rematch-forfeited"
+        | "disconnect"
+        | "reconnect";
+      by: Role;
+      ts: number;
+    };
 
 export type MatchResult =
   | { type: "win"; winnerRole: Role }
@@ -13,10 +34,19 @@ export type MatchResult =
   | { type: "forfeit"; winnerRole: Role }
   | null;
 
-export type RematchState = {
-  from: Role;
-  status: "pending" | "declined";
-} | null;
+export type RematchState =
+  | {
+      phase: "pending-response";
+      requester: Role;
+      responder: Role;
+      responderPrompt: "open" | "dismissed";
+    }
+  | {
+      phase: "decision-pending";
+      requester: Role;
+      responder: Role;
+    }
+  | null;
 
 export type RoomView = {
   code: string;
@@ -45,7 +75,7 @@ export type RoomView = {
     you: number;
     opponent: number;
   };
-  log: Array<{ by: Role; number: number; ts: number }>;
+  log: MatchLogEntry[];
   lastResult: MatchResult;
   rematch: RematchState;
   disconnect: {

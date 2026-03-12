@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useGameState } from "../state/useGameState";
 import type {
   CompletedLine,
+  MatchLogEntry,
   MatchResult,
   Role,
   RoomView
@@ -9,6 +10,8 @@ import type {
 import { useResultSound } from "./useResultSound";
 
 const LINE_ANIMATION_MS = 520;
+const LOG_HIGHLIGHT_MS = 1800;
+const LOG_BOTTOM_THRESHOLD = 36;
 
 export function App() {
   const { status, view, error, actions, savedName } = useGameState();
@@ -100,20 +103,32 @@ function GameScreen({
     confirmCall: (number: number) => void;
     requestRematch: () => void;
     respondRematch: (accept: boolean) => void;
-    forceRematch: () => void;
+    dismissRematchPrompt: () => void;
+    continueRematch: () => void;
+    forfeitRematch: () => void;
     endTieDueDisconnect: () => void;
   };
 }) {
   const [selected, setSelected] = useState<number | null>(null);
   const [animatedLineIds, setAnimatedLineIds] = useState<string[]>([]);
   const [isResultModalOpen, setIsResultModalOpen] = useState(false);
+  const [isIncomingRematchModalOpen, setIsIncomingRematchModalOpen] = useState(false);
+  const [isForfeitConfirmOpen, setIsForfeitConfirmOpen] = useState(false);
+  const [highlightedLogId, setHighlightedLogId] = useState<string | null>(null);
+  const [hasUnreadLogs, setHasUnreadLogs] = useState(false);
+
   const previousLineIdsRef = useRef<string[] | null>(null);
   const previousStatusRef = useRef<RoomView["status"] | null>(null);
+  const previousLogIdsRef = useRef<string[]>([]);
+  const logScrollRef = useRef<HTMLDivElement | null>(null);
+  const wasNearBottomRef = useRef(true);
   const playResultSound = useResultSound();
 
-  const isYourTurn = view.currentTurn === view.you?.role;
+  const yourRole = view.you?.role;
+  const isYourTurn = view.currentTurn === yourRole;
   const inMatch = view.status === "in_match";
-  const canPlay = inMatch && !view.paused && isYourTurn;
+  const canPlay = inMatch && !view.paused && !view.rematch && isYourTurn;
+  const isBoardHot = canPlay;
   const calledSet = useMemo(() => new Set(view.calledNumbers), [view.calledNumbers]);
 
   useEffect(() => {
@@ -160,22 +175,74 @@ function GameScreen({
       previousStatusRef.current !== "ended" &&
       view.status === "ended"
     ) {
-      playResultSound(view.lastResult, view.you?.role);
+      playResultSound(view.lastResult, yourRole);
       setIsResultModalOpen(true);
     }
     if (!previousStatusRef.current && view.status === "ended") {
       setIsResultModalOpen(true);
     }
     previousStatusRef.current = view.status;
-  }, [playResultSound, view.lastResult, view.status, view.you?.role]);
+  }, [playResultSound, view.lastResult, view.status, yourRole]);
+
+  useEffect(() => {
+    const isResponderPending =
+      view.rematch?.phase === "pending-response" &&
+      view.rematch.responder === yourRole &&
+      view.rematch.responderPrompt === "open";
+
+    setIsIncomingRematchModalOpen(Boolean(isResponderPending));
+
+    if (view.rematch?.phase !== "decision-pending") {
+      setIsForfeitConfirmOpen(false);
+    }
+  }, [view.rematch, yourRole]);
+
+  useEffect(() => {
+    const container = logScrollRef.current;
+    const currentIds = view.log.map((entry) => entry.id);
+    const previousIds = previousLogIdsRef.current;
+    const wasNearBottom = wasNearBottomRef.current;
+
+    if (currentIds.length === 0) {
+      previousLogIdsRef.current = [];
+      setHasUnreadLogs(false);
+      wasNearBottomRef.current = true;
+      return;
+    }
+
+    const newIds = currentIds.filter((id) => !previousIds.includes(id));
+    if (newIds.length === 0) {
+      previousLogIdsRef.current = currentIds;
+      return;
+    }
+
+    const newestId = newIds[newIds.length - 1];
+
+    if (!container || wasNearBottom) {
+      requestAnimationFrame(() => {
+        container?.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+      });
+      setHasUnreadLogs(false);
+      wasNearBottomRef.current = true;
+      setHighlightedLogId(newestId);
+      const timeout = window.setTimeout(() => {
+        setHighlightedLogId((current) => (current === newestId ? null : current));
+      }, LOG_HIGHLIGHT_MS);
+
+      previousLogIdsRef.current = currentIds;
+      return () => window.clearTimeout(timeout);
+    }
+
+    setHasUnreadLogs(true);
+    wasNearBottomRef.current = false;
+    previousLogIdsRef.current = currentIds;
+    return undefined;
+  }, [view.log]);
 
   const resultText = useMemo(
-    () => getResultPresentation(view.lastResult, view.you?.role),
-    [view.lastResult, view.you?.role]
+    () => getResultPresentation(view.lastResult, yourRole),
+    [view.lastResult, yourRole]
   );
-
-  const rematchFromYou = view.rematch && view.rematch.from === view.you?.role;
-  const rematchFromOpponent = view.rematch && view.rematch.from !== view.you?.role;
 
   const completedCellSet = useMemo(
     () => new Set(view.completedLines.flatMap((line) => line.cells)),
@@ -192,27 +259,43 @@ function GameScreen({
     [animatedLineIds, view.completedLines]
   );
 
+  const rematchUI = getRematchUI(view, yourRole);
+
   return (
     <>
       <main className="grid-layout">
         <section className="card">
           <div className="section-title">Players</div>
           <div className="players">
-            <div className="player">
+            <div className={`player ${inMatch ? "player--active-match" : ""}`}>
               <div className="player-name">You: {view.you?.name}</div>
-              <div className="player-meta">Role {view.you?.role} · Wins {view.scores.you}</div>
-              <div className={`badge ${view.you?.ready ? "badge--on" : ""}`}>
-                {view.you?.ready ? "Ready" : "Not Ready"}
+              <div className="player-role">Role {yourRole}</div>
+              <div className="player-score">
+                <span className="player-score__label">Wins</span>
+                <span className="player-score__value">{view.scores.you}</span>
               </div>
+              {!inMatch ? (
+                <div className={`badge ${view.you?.ready ? "badge--on" : ""}`}>
+                  {view.you?.ready ? "Ready" : "Not Ready"}
+                </div>
+              ) : (
+                <div className="player-status">{getPlayerStatusLabel(view, "you")}</div>
+              )}
             </div>
-            <div className="player">
+            <div className={`player ${inMatch ? "player--active-match" : ""}`}>
               <div className="player-name">Opponent: {view.opponent?.name ?? "Waiting..."}</div>
-              <div className="player-meta">
-                {view.opponent ? `Role ${view.opponent.role} · Wins ${view.scores.opponent}` : "-"}
+              <div className="player-role">{view.opponent ? `Role ${view.opponent.role}` : "-"}</div>
+              <div className="player-score">
+                <span className="player-score__label">Wins</span>
+                <span className="player-score__value">{view.scores.opponent}</span>
               </div>
-              <div className={`badge ${view.opponent?.ready ? "badge--on" : ""}`}>
-                {view.opponent?.ready ? "Ready" : "Not Ready"}
-              </div>
+              {!inMatch ? (
+                <div className={`badge ${view.opponent?.ready ? "badge--on" : ""}`}>
+                  {view.opponent?.ready ? "Ready" : "Not Ready"}
+                </div>
+              ) : (
+                <div className="player-status">{getPlayerStatusLabel(view, "opponent")}</div>
+              )}
             </div>
           </div>
 
@@ -226,6 +309,8 @@ function GameScreen({
             <div className="turn-indicator">
               {view.paused ? (
                 <span className="danger">Opponent disconnected. Waiting...</span>
+              ) : view.rematch ? (
+                <span className="muted">{rematchUI.statusCopy}</span>
               ) : isYourTurn ? (
                 <span className="accent">Your turn</span>
               ) : (
@@ -256,6 +341,7 @@ function GameScreen({
             animatedLineIds={animatedLineIds}
             completedCellSet={completedCellSet}
             animatedCellSet={animatedCellSet}
+            isActiveTurn={isBoardHot}
             onSelect={(num) => {
               if (!canPlay || calledSet.has(num)) return;
               setSelected(num);
@@ -277,62 +363,83 @@ function GameScreen({
           </div>
         </section>
 
-        <section className="card">
-          <div className="section-title">Call Log</div>
-          <ul className="log">
-            {view.log.length === 0 ? <li className="muted">No calls yet.</li> : null}
-            {view.log.map((entry) => (
-              <li key={`${entry.ts}-${entry.number}`}>
-                {entry.by === view.you?.role ? "You" : "Opponent"} called{" "}
-                <strong>{entry.number}</strong>
-              </li>
-            ))}
-          </ul>
+        <section className="card timeline-panel">
+          <div className="timeline-header">
+            <div className="section-title">Match Log</div>
+          </div>
 
-          {view.status === "in_match" ? (
-            <div className="rematch">
-              {!view.rematch ? (
-                <button className="btn" onClick={actions.requestRematch}>
-                  Request Rematch
-                </button>
-              ) : rematchFromYou && view.rematch.status === "pending" ? (
-                <div className="muted">Rematch request sent...</div>
-              ) : rematchFromYou && view.rematch.status === "declined" ? (
-                <div>
-                  <div className="muted">Rematch declined.</div>
-                  <button className="btn danger" onClick={actions.forceRematch}>
-                    Force Rematch (You Forfeit)
-                  </button>
-                </div>
-              ) : rematchFromOpponent && view.rematch.status === "pending" ? (
+          <div className="timeline-stream">
+            <div
+              ref={logScrollRef}
+              className="timeline-scroll"
+              onScroll={() => {
+                const container = logScrollRef.current;
+                if (container && isNearBottom(container)) {
+                  setHasUnreadLogs(false);
+                }
+                wasNearBottomRef.current = !container || isNearBottom(container);
+              }}
+            >
+              {view.log.length === 0 ? (
+                <div className="timeline-empty">No calls yet.</div>
+              ) : (
+                view.log.map((entry) => (
+                  <LogCard
+                    key={entry.id}
+                    entry={entry}
+                    yourRole={yourRole}
+                    highlighted={highlightedLogId === entry.id}
+                  />
+                ))
+              )}
+            </div>
+
+            {hasUnreadLogs ? (
+              <button
+                className="timeline-jump-chip"
+                onClick={() => {
+                  wasNearBottomRef.current = true;
+                  logScrollRef.current?.scrollTo({
+                    top: logScrollRef.current.scrollHeight,
+                    behavior: "smooth"
+                  });
+                  setHasUnreadLogs(false);
+                }}
+              >
+                <span className="timeline-jump-chip__dot" />
+                <span className="timeline-jump-chip__label">New activity</span>
+                <span className="timeline-jump-chip__arrow">↓</span>
+              </button>
+            ) : null}
+          </div>
+
+          <div className="timeline-footer">
+            {view.status === "in_match" ? (
+              <RematchFooter
+                view={view}
+                yourRole={yourRole}
+                rematchUI={rematchUI}
+                actions={actions}
+              />
+            ) : null}
+
+            {view.status === "ended" && !isResultModalOpen ? (
+              <div className="post-match-panel">
+                <div className="section-title">Match Result</div>
+                <div className="post-match-title">{resultText.title}</div>
+                <p className="post-match-copy">{resultText.copy}</p>
                 <div className="row">
-                  <button className="btn primary" onClick={() => actions.respondRematch(true)}>
-                    Accept Rematch
-                  </button>
-                  <button className="btn" onClick={() => actions.respondRematch(false)}>
-                    Decline
+                  <button
+                    className="btn primary"
+                    onClick={() => actions.setReady(true)}
+                    disabled={view.you?.ready ?? false}
+                  >
+                    {view.you?.ready ? "Waiting For Opponent" : "Ready For Next Match"}
                   </button>
                 </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {view.status === "ended" && !isResultModalOpen ? (
-            <div className="post-match-panel">
-              <div className="section-title">Match Result</div>
-              <div className="post-match-title">{resultText.title}</div>
-              <p className="post-match-copy">{resultText.copy}</p>
-              <div className="row">
-                <button
-                  className="btn primary"
-                  onClick={() => actions.setReady(true)}
-                  disabled={view.you?.ready ?? false}
-                >
-                  {view.you?.ready ? "Waiting For Opponent" : "Ready For Next Match"}
-                </button>
               </div>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </section>
       </main>
 
@@ -344,8 +451,113 @@ function GameScreen({
           onDismiss={() => setIsResultModalOpen(false)}
         />
       ) : null}
+
+      {view.status === "in_match" && isIncomingRematchModalOpen ? (
+        <ActionModal
+          title="Opponent wants a rematch"
+          body="If you accept, the current match ends as a tie and no one gets a point."
+          dismissible
+          onDismiss={() => {
+            setIsIncomingRematchModalOpen(false);
+            actions.dismissRematchPrompt();
+          }}
+          actions={
+            <>
+              <button className="btn primary" onClick={() => actions.respondRematch(true)}>
+                Accept
+              </button>
+              <button className="btn" onClick={() => actions.respondRematch(false)}>
+                Decline
+              </button>
+            </>
+          }
+        />
+      ) : null}
+
+      {view.status === "in_match" &&
+      view.rematch?.phase === "decision-pending" &&
+      view.rematch.requester === yourRole ? (
+        <ActionModal
+          title="Rematch declined"
+          body="Your opponent declined the rematch. Continue playing, or forfeit now and give them the point."
+          dismissible={false}
+          actions={
+            <>
+              <button className="btn" onClick={actions.continueRematch}>
+                Continue Match
+              </button>
+              <button className="btn danger" onClick={() => setIsForfeitConfirmOpen(true)}>
+                Forfeit Match
+              </button>
+            </>
+          }
+        />
+      ) : null}
+
+      {isForfeitConfirmOpen ? (
+        <ActionModal
+          title="Confirm forfeit"
+          body="If you forfeit now, the current point is awarded to your opponent."
+          dismissible
+          onDismiss={() => setIsForfeitConfirmOpen(false)}
+          actions={
+            <>
+              <button className="btn" onClick={() => setIsForfeitConfirmOpen(false)}>
+                Go Back
+              </button>
+              <button className="btn danger" onClick={actions.forfeitRematch}>
+                Confirm Forfeit
+              </button>
+            </>
+          }
+        />
+      ) : null}
     </>
   );
+}
+
+function RematchFooter({
+  view,
+  yourRole,
+  rematchUI,
+  actions
+}: {
+  view: RoomView;
+  yourRole: Role | undefined;
+  rematchUI: ReturnType<typeof getRematchUI>;
+  actions: {
+    requestRematch: () => void;
+    respondRematch: (accept: boolean) => void;
+  };
+}) {
+  if (view.paused && view.disconnect.opponent) {
+    return <div className="timeline-status danger">Waiting for reconnect or match resolution.</div>;
+  }
+
+  if (!view.rematch) {
+    return (
+      <div className="timeline-actions">
+        <button className="btn" onClick={actions.requestRematch}>
+          Request Rematch
+        </button>
+      </div>
+    );
+  }
+
+  if (view.rematch.phase === "pending-response" && view.rematch.responder === yourRole) {
+    return (
+      <div className="timeline-actions">
+        <button className="btn primary" onClick={() => actions.respondRematch(true)}>
+          Accept
+        </button>
+        <button className="btn" onClick={() => actions.respondRematch(false)}>
+          Decline
+        </button>
+      </div>
+    );
+  }
+
+  return <div className="timeline-status">{rematchUI.footerCopy}</div>;
 }
 
 function Board({
@@ -356,6 +568,7 @@ function Board({
   animatedLineIds,
   completedCellSet,
   animatedCellSet,
+  isActiveTurn,
   onSelect
 }: {
   board: number[];
@@ -365,10 +578,11 @@ function Board({
   animatedLineIds: string[];
   completedCellSet: Set<number>;
   animatedCellSet: Set<number>;
+  isActiveTurn: boolean;
   onSelect: (num: number) => void;
 }) {
   return (
-    <div className="board-shell">
+    <div className={`board-shell ${isActiveTurn ? "board-shell--active" : "board-shell--idle"}`}>
       <div className="board">
         {board.map((num, index) => {
           const called = calledSet.has(num);
@@ -427,6 +641,35 @@ function BoardLineOverlays({
   );
 }
 
+function LogCard({
+  entry,
+  yourRole,
+  highlighted
+}: {
+  entry: MatchLogEntry;
+  yourRole: Role | undefined;
+  highlighted: boolean;
+}) {
+  const isYou = entry.by === yourRole;
+  const copy = getLogCopy(entry, isYou);
+
+  return (
+    <article
+      className={[
+        "timeline-entry",
+        `timeline-entry--${entry.type}`,
+        isYou ? "timeline-entry--you" : "timeline-entry--opponent",
+        highlighted ? "timeline-entry--fresh" : ""
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <div className="timeline-entry__badge">{isYou ? "You" : "Opponent"}</div>
+      <div className="timeline-entry__copy">{copy}</div>
+    </article>
+  );
+}
+
 function ResultModal({
   presentation,
   onReady,
@@ -462,6 +705,44 @@ function ResultModal({
             {ready ? "Waiting For Opponent" : "Ready For Next Match"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ActionModal({
+  title,
+  body,
+  actions,
+  dismissible,
+  onDismiss
+}: {
+  title: string;
+  body: string;
+  actions: ReactNode;
+  dismissible: boolean;
+  onDismiss?: () => void;
+}) {
+  return (
+    <div
+      className="dialog-backdrop"
+      onClick={dismissible ? onDismiss : undefined}
+      aria-hidden={dismissible ? undefined : true}
+    >
+      <div className="dialog-modal" onClick={(event) => event.stopPropagation()}>
+        {dismissible ? (
+          <button
+            type="button"
+            className="result-close"
+            onClick={onDismiss}
+            aria-label="Close dialog"
+          >
+            ×
+          </button>
+        ) : null}
+        <div className="dialog-title">{title}</div>
+        <p className="dialog-copy">{body}</p>
+        <div className="row">{actions}</div>
       </div>
     </div>
   );
@@ -562,4 +843,90 @@ function getResultPresentation(result: MatchResult, yourRole: Role | undefined) 
         copy: "Your opponent reached five lines first. Ready up to start a fresh board.",
         theme: "loss" as const
       };
+}
+
+function getRematchUI(view: RoomView, yourRole: Role | undefined) {
+  if (!view.rematch || !yourRole) {
+    return {
+      statusCopy: "",
+      footerCopy: ""
+    };
+  }
+
+  if (view.rematch.phase === "pending-response") {
+    if (view.rematch.requester === yourRole) {
+      return {
+        statusCopy: "Waiting for opponent to respond to your rematch request.",
+        footerCopy: "Waiting for opponent to respond."
+      };
+    }
+    return {
+      statusCopy: "Opponent requested a rematch.",
+      footerCopy: "Choose whether to accept a tie or keep the current match alive."
+    };
+  }
+
+  if (view.rematch.requester === yourRole) {
+    return {
+      statusCopy: "Your rematch was declined. Choose continue or forfeit.",
+      footerCopy: "Decision required in the popup."
+    };
+  }
+
+  return {
+    statusCopy: "Waiting for opponent to decide whether to continue or forfeit.",
+    footerCopy: "Waiting for opponent's response."
+  };
+}
+
+function getLogCopy(entry: MatchLogEntry, isYou: boolean) {
+  switch (entry.type) {
+    case "call":
+      return `${isYou ? "called" : "called"} ${entry.number}`;
+    case "rematch-requested":
+      return `${isYou ? "requested a rematch" : "requested a rematch"}`;
+    case "rematch-accepted":
+      return `${isYou ? "accepted the rematch" : "accepted the rematch"}`;
+    case "rematch-declined":
+      return `${isYou ? "declined the rematch" : "declined the rematch"}`;
+    case "rematch-continued":
+      return `${isYou ? "continued the match" : "continued the match"}`;
+    case "rematch-forfeited":
+      return `${isYou ? "forfeited the match" : "forfeited the match"}`;
+    case "disconnect":
+      return `${isYou ? "went offline" : "went offline"}`;
+    case "reconnect":
+      return `${isYou ? "reconnected" : "reconnected"}`;
+    default:
+      return "updated the match";
+  }
+}
+
+function isNearBottom(container: HTMLDivElement) {
+  return (
+    container.scrollHeight - container.scrollTop - container.clientHeight <
+    LOG_BOTTOM_THRESHOLD
+  );
+}
+
+function getPlayerStatusLabel(view: RoomView, side: "you" | "opponent") {
+  if (view.status !== "in_match") {
+    return side === "you"
+      ? view.you?.ready
+        ? "Ready"
+        : "Not Ready"
+      : view.opponent?.ready
+      ? "Ready"
+      : "Not Ready";
+  }
+
+  if (view.paused) {
+    return side === "you" ? "Waiting on reconnect" : "Disconnected";
+  }
+
+  if (view.rematch) {
+    return side === "you" ? "Match decision pending" : "Match decision pending";
+  }
+
+  return side === "you" ? "Playing" : "Playing";
 }

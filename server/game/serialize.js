@@ -36,7 +36,7 @@ export function toPlayerView(room, role) {
       you: room.scores[role],
       opponent: room.scores[oppRole]
     },
-    log: room.log.slice(-8),
+    log: room.log,
     lastResult: room.lastResult,
     rematch: room.rematch,
     disconnect: {

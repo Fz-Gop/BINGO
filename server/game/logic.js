@@ -31,6 +31,14 @@ export function createPlayer({ id, name, role, socketId }) {
   };
 }
 
+export function appendLog(room, entry) {
+  room.log.push({
+    id: `log-${room.log.length + 1}-${now()}`,
+    ts: now(),
+    ...entry
+  });
+}
+
 export function getCompletedLines(board, calledSet) {
   const completed = [];
 
@@ -137,6 +145,9 @@ export function applyCall(room, role, number) {
   if (room.paused) {
     return { ok: false, error: "Match is paused (opponent disconnected)." };
   }
+  if (room.rematch) {
+    return { ok: false, error: "Resolve the rematch prompt before continuing." };
+  }
   if (!Number.isInteger(number) || number < 1 || number > 25) {
     return { ok: false, error: "Invalid number." };
   }
@@ -148,7 +159,7 @@ export function applyCall(room, role, number) {
   }
 
   room.calledNumbers.add(number);
-  room.log.push({ by: role, number, ts: now() });
+  appendLog(room, { type: "call", by: role, number });
 
   room.completedLines.A = getCompletedLines(room.boards.A, room.calledNumbers);
   room.completedLines.B = getCompletedLines(room.boards.B, room.calledNumbers);

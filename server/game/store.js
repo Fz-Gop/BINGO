@@ -54,6 +54,7 @@ export function rejoinRoom({ code, playerId, socketId }) {
   if (!role) {
     return { error: "Player not found in room." };
   }
+  const wasDisconnected = room.players[role]?.connected === false;
   attachSocket(room, role, socketId);
   if (room.players.A?.connected && room.players.B?.connected) {
     room.disconnect = { A: false, B: false };
@@ -61,7 +62,7 @@ export function rejoinRoom({ code, playerId, socketId }) {
       room.paused = false;
     }
   }
-  return { room, role, rejoined: true };
+  return { room, role, rejoined: true, wasDisconnected };
 }
 
 export function detachSocket(room, socketId) {

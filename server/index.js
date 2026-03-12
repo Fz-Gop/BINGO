@@ -6,6 +6,7 @@ import express from "express";
 import { Server as SocketIOServer } from "socket.io";
 
 import {
+  appendLog,
   applyCall,
   canStartMatch,
   endMatch,
@@ -52,6 +53,15 @@ const io = new SocketIOServer(httpServer, {
           methods: ["GET", "POST"]
         }
 });
+
+function createPendingRematch(role) {
+  return {
+    phase: "pending-response",
+    requester: role,
+    responder: otherRole(role),
+    responderPrompt: "open"
+  };
+}
 
 function emitState(room) {
   ["A", "B"].forEach((role) => {
@@ -115,6 +125,9 @@ io.on("connection", (socket) => {
       emitError(socket, result.error);
       return;
     }
+    if (result.wasDisconnected && result.room.status === "in_match") {
+      appendLog(result.room, { type: "reconnect", by: result.role });
+    }
     emitState(result.room);
   });
 
@@ -143,28 +156,56 @@ io.on("connection", (socket) => {
   socket.on("game:rematch:request", () => {
     const { room, role } = locateRoomBySocket(socket.id);
     if (!room || room.status !== "in_match") return;
-    room.rematch = { from: role, status: "pending" };
+    if (room.paused || room.rematch) return;
+    room.rematch = createPendingRematch(role);
+    appendLog(room, { type: "rematch-requested", by: role });
     emitState(room);
   });
 
   socket.on("game:rematch:respond", ({ accept }) => {
     const { room, role } = locateRoomBySocket(socket.id);
     if (!room || room.status !== "in_match") return;
-    if (!room.rematch || room.rematch.status !== "pending") return;
-    if (room.rematch.from === role) return;
+    if (!room.rematch || room.rematch.phase !== "pending-response") return;
+    if (room.rematch.requester === role) return;
     if (accept) {
+      appendLog(room, { type: "rematch-accepted", by: role });
       endMatch(room, { type: "tie" });
     } else {
-      room.rematch = { from: room.rematch.from, status: "declined" };
+      appendLog(room, { type: "rematch-declined", by: role });
+      room.rematch = {
+        phase: "decision-pending",
+        requester: room.rematch.requester,
+        responder: role
+      };
     }
     emitState(room);
   });
 
-  socket.on("game:rematch:force", () => {
+  socket.on("game:rematch:dismiss", () => {
     const { room, role } = locateRoomBySocket(socket.id);
     if (!room || room.status !== "in_match") return;
-    if (!room.rematch || room.rematch.status !== "declined") return;
-    if (room.rematch.from !== role) return;
+    if (!room.rematch || room.rematch.phase !== "pending-response") return;
+    if (room.rematch.responder !== role) return;
+    room.rematch = { ...room.rematch, responderPrompt: "dismissed" };
+    emitState(room);
+  });
+
+  socket.on("game:rematch:continue", () => {
+    const { room, role } = locateRoomBySocket(socket.id);
+    if (!room || room.status !== "in_match") return;
+    if (!room.rematch || room.rematch.phase !== "decision-pending") return;
+    if (room.rematch.requester !== role) return;
+    appendLog(room, { type: "rematch-continued", by: role });
+    room.rematch = null;
+    emitState(room);
+  });
+
+  socket.on("game:rematch:forfeit", () => {
+    const { room, role } = locateRoomBySocket(socket.id);
+    if (!room || room.status !== "in_match") return;
+    if (!room.rematch || room.rematch.phase !== "decision-pending") return;
+    if (room.rematch.requester !== role) return;
+    appendLog(room, { type: "rematch-forfeited", by: role });
     endMatch(room, { type: "forfeit", winnerRole: otherRole(role) });
     emitState(room);
   });
@@ -184,7 +225,15 @@ io.on("connection", (socket) => {
     if (!room || !role) return;
     detachSocket(room, socket.id);
     room.disconnect[role] = true;
-    if (room.status === "in_match") {
+    if (
+      room.status === "in_match" &&
+      room.rematch &&
+      room.rematch.phase === "decision-pending"
+    ) {
+      appendLog(room, { type: "disconnect", by: role });
+      endMatch(room, { type: "forfeit", winnerRole: otherRole(role) });
+    } else if (room.status === "in_match") {
+      appendLog(room, { type: "disconnect", by: role });
       room.paused = true;
     }
     emitState(room);
