@@ -106,6 +106,7 @@ function GameScreen({
 }) {
   const [selected, setSelected] = useState<number | null>(null);
   const [animatedLineIds, setAnimatedLineIds] = useState<string[]>([]);
+  const [isResultModalOpen, setIsResultModalOpen] = useState(false);
   const previousLineIdsRef = useRef<string[] | null>(null);
   const previousStatusRef = useRef<RoomView["status"] | null>(null);
   const playResultSound = useResultSound();
@@ -148,12 +149,22 @@ function GameScreen({
   }, [view.completedLines]);
 
   useEffect(() => {
+    if (view.status !== "ended") {
+      setIsResultModalOpen(false);
+    }
+  }, [view.status]);
+
+  useEffect(() => {
     if (
       previousStatusRef.current &&
       previousStatusRef.current !== "ended" &&
       view.status === "ended"
     ) {
       playResultSound(view.lastResult, view.you?.role);
+      setIsResultModalOpen(true);
+    }
+    if (!previousStatusRef.current && view.status === "ended") {
+      setIsResultModalOpen(true);
     }
     previousStatusRef.current = view.status;
   }, [playResultSound, view.lastResult, view.status, view.you?.role]);
@@ -305,14 +316,32 @@ function GameScreen({
               ) : null}
             </div>
           ) : null}
+
+          {view.status === "ended" && !isResultModalOpen ? (
+            <div className="post-match-panel">
+              <div className="section-title">Match Result</div>
+              <div className="post-match-title">{resultText.title}</div>
+              <p className="post-match-copy">{resultText.copy}</p>
+              <div className="row">
+                <button
+                  className="btn primary"
+                  onClick={() => actions.setReady(true)}
+                  disabled={view.you?.ready ?? false}
+                >
+                  {view.you?.ready ? "Waiting For Opponent" : "Ready For Next Match"}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </section>
       </main>
 
-      {view.status === "ended" ? (
+      {view.status === "ended" && isResultModalOpen ? (
         <ResultModal
           presentation={resultText}
           onReady={() => actions.setReady(true)}
           ready={view.you?.ready ?? false}
+          onDismiss={() => setIsResultModalOpen(false)}
         />
       ) : null}
     </>
@@ -401,22 +430,35 @@ function BoardLineOverlays({
 function ResultModal({
   presentation,
   onReady,
-  ready
+  ready,
+  onDismiss
 }: {
   presentation: ReturnType<typeof getResultPresentation>;
   onReady: () => void;
   ready: boolean;
+  onDismiss: () => void;
 }) {
   return (
-    <div className="result-backdrop">
-      <div className={`result-modal result-modal--${presentation.theme}`}>
+    <div className="result-backdrop" onClick={onDismiss}>
+      <div
+        className={`result-modal result-modal--${presentation.theme}`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="result-close"
+          onClick={onDismiss}
+          aria-label="Close result popup"
+        >
+          ×
+        </button>
         <div className="result-orb result-orb--one" />
         <div className="result-orb result-orb--two" />
         <div className="result-kicker">{presentation.kicker}</div>
         <div className="result-title">{presentation.title}</div>
         <p className="result-copy">{presentation.copy}</p>
         <div className="row">
-          <button className="btn primary" onClick={onReady}>
+          <button className="btn primary" onClick={onReady} disabled={ready}>
             {ready ? "Waiting For Opponent" : "Ready For Next Match"}
           </button>
         </div>
