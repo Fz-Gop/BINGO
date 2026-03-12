@@ -1,0 +1,17 @@
+{
+  "name": "bingo-two-player",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c cyan,magenta \"npm -w server run dev\" \"npm -w client run dev -- --host 0.0.0.0 --port 5173\"",
+    "play": "npm -w client run build && npm -w server start",
+    "start": "npm -w server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
+

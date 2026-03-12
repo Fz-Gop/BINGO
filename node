@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+NODE="$ROOT/.tools/node/bin/node"
+
+if [[ ! -x "$NODE" ]]; then
+  echo "Local Node runtime not found at: $NODE" >&2
+  echo "Run: scripts/bootstrap-node.sh" >&2
+  exit 1
+fi
+
+exec "$NODE" "$@"
+

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Project-local npm wrapper.
+# - Uses the Node runtime stored in .tools/node (inside this repo).
+# - Avoids relying on any globally installed node/npm.
+# - Keeps npm cache/prefix within the repo (see .npmrc + env below).
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+NODE="$ROOT/.tools/node/bin/node"
+NPM_CLI="$ROOT/.tools/node/lib/node_modules/npm/bin/npm-cli.js"
+
+if [[ ! -x "$NODE" ]]; then
+  echo "Local Node runtime not found at: $NODE" >&2
+  echo "Run: scripts/bootstrap-node.sh" >&2
+  exit 1
+fi
+
+export NPM_CONFIG_USERCONFIG="$ROOT/.npmrc"
+export NPM_CONFIG_CACHE="$ROOT/.npm-cache"
+export NPM_CONFIG_PREFIX="$ROOT/.npm-global"
+export PATH="$ROOT/.tools/node/bin:$PATH"
+
+exec "$NODE" "$NPM_CLI" "$@"

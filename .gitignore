@@ -1,0 +1,15 @@
+# Dependencies / package managers
+node_modules/
+
+# Vite build output
+dist/
+
+# Local-only toolchain + caches (kept inside repo on purpose)
+.tools/
+.downloads/
+.npm-cache/
+.npm-global/
+
+# Logs
+*.log
+
