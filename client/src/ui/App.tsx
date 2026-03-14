@@ -192,6 +192,8 @@ function ConfiguringScreen({ view, actions }: { view: RoomView; actions: GameAct
           <div className="room-badge">Room {view.code}</div>
         </div>
 
+        <PreStartControls view={view} actions={actions} />
+
         {self.isHost ? (
           <>
             <div className="setup-group">
@@ -304,6 +306,8 @@ function LobbyScreen({ view, actions }: { view: RoomView; actions: GameActions }
           <div className="room-badge">Room {view.code}</div>
         </div>
 
+        <PreStartControls view={view} actions={actions} />
+
         {self.isHost ? (
           <div className="waiting-card">
             <div className="waiting-card__title">Host controls the first start</div>
@@ -341,6 +345,44 @@ function LobbyScreen({ view, actions }: { view: RoomView; actions: GameActions }
         </div>
       </section>
     </main>
+  );
+}
+
+function PreStartControls({ view, actions }: { view: RoomView; actions: GameActions }) {
+  const self = getSelfPlayer(view);
+  const [name, setName] = useState(self.name);
+
+  useEffect(() => {
+    setName(self.name);
+  }, [self.name]);
+
+  const trimmedName = name.trim();
+  const canRename = Boolean(trimmedName) && trimmedName !== self.name && !view.config.locked;
+
+  return (
+    <div className="setup-controls">
+      <label className="field setup-controls__field">
+        <span>Your Name</span>
+        <input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder="Update your name before Round 1"
+          maxLength={40}
+        />
+      </label>
+      <div className="setup-controls__actions">
+        <button
+          className="btn"
+          onClick={() => actions.renameRoomPlayer(trimmedName)}
+          disabled={!canRename}
+        >
+          Save Name
+        </button>
+        <button className="btn btn--quiet" onClick={() => actions.leaveRoom()}>
+          Leave Room
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -132,6 +132,19 @@ export function canHostStart(room, playerId) {
   );
 }
 
+export function renamePlayer(room, playerId, name) {
+  const player = getPlayer(room, playerId);
+  if (!player || player.left) {
+    return { ok: false, error: "Only room participants can change their name." };
+  }
+  if (room.config.locked || (room.status !== "configuring" && room.status !== "lobby")) {
+    return { ok: false, error: "Names can only be changed before the first match starts." };
+  }
+
+  player.name = name;
+  return { ok: true };
+}
+
 export function startFirstMatch(room) {
   const starters = getReadyToStartPlayers(room);
   if (starters.length < 2) {

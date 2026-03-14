@@ -13,6 +13,7 @@ type ClientToServerEvents = {
   "room:join": (payload: { code: string; playerId: string; name: string }) => void;
   "room:rejoin": (payload: { code: string; playerId: string }) => void;
   "room:configure": (payload: { maxPlayers: number; boardSize: number }) => void;
+  "room:rename": (payload: { name: string }) => void;
   "room:start": () => void;
   "room:ready": (payload: { ready: boolean }) => void;
   "room:leave": () => void;
@@ -136,6 +137,11 @@ export function useGameState() {
     socket.emit("room:start");
   }
 
+  function renameRoomPlayer(name: string) {
+    if (!name.trim()) return;
+    socket.emit("room:rename", { name: name.trim() });
+  }
+
   function setReady(ready: boolean) {
     socket.emit("room:ready", { ready });
   }
@@ -170,6 +176,7 @@ export function useGameState() {
       createRoom,
       joinRoom,
       configureRoom,
+      renameRoomPlayer,
       startRoom,
       setReady,
       leaveRoom,

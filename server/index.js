@@ -18,6 +18,7 @@ import {
   getPlayer,
   leaveRoom,
   markPlayerDisconnected,
+  renamePlayer,
   reconnectPlayer,
   setPlayerReady,
   startFirstMatch,
@@ -255,7 +256,7 @@ io.on("connection", (socket) => {
   socket.on("room:configure", ({ maxPlayers, boardSize }) => {
     const { room, player } = locateRoomBySocket(socket.id);
     if (!room || !player) return;
-    if (room.hostPlayerId !== player.id || room.config.locked) {
+    if (room.status !== "configuring" || room.hostPlayerId !== player.id || room.config.locked) {
       emitError(socket, "Only the host can configure this room.");
       return;
     }
@@ -267,6 +268,21 @@ io.on("connection", (socket) => {
     }
 
     configureRoom(room, { maxPlayers, boardSize });
+    emitState(room);
+  });
+
+  socket.on("room:rename", ({ name }) => {
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    if (!name?.trim()) {
+      emitError(socket, "Name is required.");
+      return;
+    }
+    const result = renamePlayer(room, player.id, name.trim());
+    if (!result.ok) {
+      emitError(socket, result.error);
+      return;
+    }
     emitState(room);
   });
 

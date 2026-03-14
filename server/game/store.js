@@ -34,7 +34,7 @@ export function joinRoom({ code, playerId, name, socketId }) {
     if (existingPlayer.left) {
       return { error: "You already left this room." };
     }
-    attachSocket(room, existingPlayer.id, socketId, name);
+    attachSocket(room, existingPlayer.id, socketId, room.config.locked ? undefined : name);
     return { room, playerId: existingPlayer.id, rejoined: true };
   }
 
