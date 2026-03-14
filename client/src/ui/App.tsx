@@ -330,6 +330,21 @@ function GameScreen({
   const rematchUI = getRematchUI(view, yourRole);
   const shouldConfirmLeave = inMatch && opponentConnected && !view.paused;
   const nextMatchBlocked = Boolean(view.opponent?.left);
+  const { yourTurnCount, opponentTurnCount } = useMemo(() => {
+    let yours = 0;
+    let opponents = 0;
+
+    view.log.forEach((entry) => {
+      if (entry.type !== "call") return;
+      if (entry.by === yourRole) {
+        yours += 1;
+      } else {
+        opponents += 1;
+      }
+    });
+
+    return { yourTurnCount: yours, opponentTurnCount: opponents };
+  }, [view.log, yourRole]);
 
   function handleLeaveRequest() {
     if (shouldConfirmLeave) {
@@ -354,8 +369,14 @@ function GameScreen({
               <div className="player-name">You: {view.you?.name}</div>
               <div className="player-role">Role {yourRole}</div>
               <div className="player-score">
-                <span className="player-score__label">Wins</span>
-                <span className="player-score__value">{view.scores.you}</span>
+                <div className="player-metric">
+                  <span className="player-score__label">Wins</span>
+                  <span className="player-score__value">{view.scores.you}</span>
+                </div>
+                <div className="player-metric player-metric--secondary">
+                  <span className="player-score__label">Turns</span>
+                  <span className="player-turns__value">{yourTurnCount}</span>
+                </div>
               </div>
               {!inMatch ? (
                 <div className={`badge ${view.you?.ready ? "badge--on" : ""}`}>
@@ -369,8 +390,14 @@ function GameScreen({
               <div className="player-name">Opponent: {view.opponent?.name ?? "Waiting..."}</div>
               <div className="player-role">{view.opponent ? `Role ${view.opponent.role}` : "-"}</div>
               <div className="player-score">
-                <span className="player-score__label">Wins</span>
-                <span className="player-score__value">{view.scores.opponent}</span>
+                <div className="player-metric">
+                  <span className="player-score__label">Wins</span>
+                  <span className="player-score__value">{view.scores.opponent}</span>
+                </div>
+                <div className="player-metric player-metric--secondary">
+                  <span className="player-score__label">Turns</span>
+                  <span className="player-turns__value">{opponentTurnCount}</span>
+                </div>
               </div>
               {!inMatch ? (
                 <div className={`badge ${view.opponent?.ready ? "badge--on" : ""}`}>

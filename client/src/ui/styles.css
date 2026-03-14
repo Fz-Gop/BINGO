@@ -432,8 +432,19 @@ h1 {
 .player-score {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: 18px;
   margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.player-metric {
+  display: grid;
+  gap: 4px;
+}
+
+.player-metric--secondary {
+  padding-left: 14px;
+  border-left: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .player-score__label {
@@ -449,6 +460,13 @@ h1 {
   line-height: 0.95;
   font-weight: 900;
   color: var(--accent);
+}
+
+.player-turns__value {
+  font-size: clamp(18px, 2.4vw, 24px);
+  line-height: 1;
+  font-weight: 800;
+  color: rgba(26, 26, 26, 0.78);
 }
 
 .player-status {
@@ -485,6 +503,7 @@ h1 {
 .board-card {
   display: grid;
   gap: 14px;
+  align-content: start;
 }
 
 .board-header {
@@ -500,6 +519,7 @@ h1 {
 
 .board-shell {
   position: relative;
+  align-self: start;
   padding: 12px;
   border-radius: 24px;
   border: 2px solid rgba(95, 95, 95, 0.16);
