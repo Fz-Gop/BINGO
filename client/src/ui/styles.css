@@ -308,6 +308,27 @@ h1 {
   gap: 12px;
 }
 
+.player-list--dense {
+  gap: 10px;
+}
+
+.player-list--dense .player-tile {
+  gap: 10px;
+  padding: 12px;
+}
+
+.player-list--dense .score-strip {
+  gap: 12px;
+}
+
+.player-list--dense .score-strip__value {
+  font-size: 30px;
+}
+
+.player-list--dense .score-strip__metric--secondary .score-strip__value {
+  font-size: 22px;
+}
+
 .player-tile {
   display: grid;
   gap: 12px;

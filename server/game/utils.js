@@ -1,5 +1,5 @@
-export const PLAYABLE_PLAYER_COUNTS = [2, 3];
-export const COMING_SOON_PLAYER_COUNTS = [4];
+export const PLAYABLE_PLAYER_COUNTS = [2, 3, 4];
+export const COMING_SOON_PLAYER_COUNTS = [];
 export const PLAYABLE_BOARD_SIZES = [5, 6, 7];
 export const COMING_SOON_BOARD_SIZES = [];
 export const PRECONFIG_JOIN_LIMIT = Math.max(...PLAYABLE_PLAYER_COUNTS);

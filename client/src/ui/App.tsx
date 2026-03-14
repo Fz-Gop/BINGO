@@ -268,7 +268,7 @@ function ConfiguringScreen({ view, actions }: { view: RoomView; actions: GameAct
 
       <section className="card roster-card">
         <div className="section-title">Joined players</div>
-        <div className="player-list">
+        <div className={`player-list ${view.players.length >= 4 ? "player-list--dense" : ""}`}>
           {view.players.map((player) => (
             <PlayerListItem
               key={player.id}
@@ -327,7 +327,7 @@ function LobbyScreen({ view, actions }: { view: RoomView; actions: GameActions }
 
       <section className="card roster-card">
         <div className="section-title">Players in room</div>
-        <div className="player-list">
+        <div className={`player-list ${view.players.length >= 4 ? "player-list--dense" : ""}`}>
           {view.players.map((player) => (
             <PlayerListItem
               key={player.id}
@@ -505,7 +505,7 @@ function RoundScreen({ view, actions }: { view: RoomView; actions: GameActions }
               Leave Room
             </button>
           </div>
-          <div className="player-list">
+          <div className={`player-list ${view.players.length >= 4 ? "player-list--dense" : ""}`}>
             {view.players.map((player) => (
               <PlayerListItem
                 key={player.id}
