@@ -12,15 +12,14 @@ type ClientToServerEvents = {
   "room:create": (payload: { playerId: string; name: string }) => void;
   "room:join": (payload: { code: string; playerId: string; name: string }) => void;
   "room:rejoin": (payload: { code: string; playerId: string }) => void;
+  "room:configure": (payload: { maxPlayers: number; boardSize: number }) => void;
+  "room:start": () => void;
   "room:ready": (payload: { ready: boolean }) => void;
-  "room:leave": (payload?: { forfeit?: boolean }) => void;
+  "room:leave": () => void;
   "game:call": (payload: { number: number }) => void;
+  "game:forfeit": () => void;
   "game:rematch:request": () => void;
-  "game:rematch:respond": (payload: { accept: boolean }) => void;
-  "game:rematch:dismiss": () => void;
-  "game:rematch:continue": () => void;
-  "game:rematch:forfeit": () => void;
-  "game:tie:disconnect": () => void;
+  "game:rematch:vote": (payload: { vote: "accept" | "decline" }) => void;
 };
 
 type ConnectionStatus = "connecting" | "connected" | "error";
@@ -45,6 +44,15 @@ function getSocketBaseUrl() {
     return `${window.location.protocol}//${window.location.hostname}:3000`;
   }
   return window.location.origin;
+}
+
+function shouldForgetRoom(message: string) {
+  return [
+    "Room not found.",
+    "Player not found in room.",
+    "You already left this room.",
+    "Room is locked."
+  ].includes(message);
 }
 
 export function useGameState() {
@@ -81,15 +89,19 @@ export function useGameState() {
     socket.on("room:state", ({ view: nextView }) => {
       setView(nextView);
       setError(null);
-      if (nextView?.code) {
+      if (nextView.code) {
         localStorage.setItem(ROOM_CODE_KEY, nextView.code);
       }
-      if (nextView?.you?.name) {
-        localStorage.setItem(PLAYER_NAME_KEY, nextView.you.name);
+      const self = nextView.players.find((player) => player.id === nextView.selfPlayerId);
+      if (self?.name) {
+        localStorage.setItem(PLAYER_NAME_KEY, self.name);
       }
     });
     socket.on("room:error", ({ message }) => {
       setError(message);
+      if (shouldForgetRoom(message)) {
+        localStorage.removeItem(ROOM_CODE_KEY);
+      }
     });
     socket.on("room:left", () => {
       setView(null);
@@ -116,40 +128,36 @@ export function useGameState() {
     });
   }
 
+  function configureRoom(maxPlayers: number, boardSize: number) {
+    socket.emit("room:configure", { maxPlayers, boardSize });
+  }
+
+  function startRoom() {
+    socket.emit("room:start");
+  }
+
   function setReady(ready: boolean) {
     socket.emit("room:ready", { ready });
   }
 
-  function leaveRoom(forfeit = false) {
-    socket.emit("room:leave", { forfeit });
+  function leaveRoom() {
+    socket.emit("room:leave");
   }
 
   function confirmCall(number: number) {
     socket.emit("game:call", { number });
   }
 
+  function forfeitRound() {
+    socket.emit("game:forfeit");
+  }
+
   function requestRematch() {
     socket.emit("game:rematch:request");
   }
 
-  function respondRematch(accept: boolean) {
-    socket.emit("game:rematch:respond", { accept });
-  }
-
-  function dismissRematchPrompt() {
-    socket.emit("game:rematch:dismiss");
-  }
-
-  function continueRematch() {
-    socket.emit("game:rematch:continue");
-  }
-
-  function forfeitRematch() {
-    socket.emit("game:rematch:forfeit");
-  }
-
-  function endTieDueDisconnect() {
-    socket.emit("game:tie:disconnect");
+  function voteRematch(vote: "accept" | "decline") {
+    socket.emit("game:rematch:vote", { vote });
   }
 
   const savedName = localStorage.getItem(PLAYER_NAME_KEY) || "";
@@ -161,15 +169,14 @@ export function useGameState() {
     actions: {
       createRoom,
       joinRoom,
+      configureRoom,
+      startRoom,
       setReady,
       leaveRoom,
       confirmCall,
+      forfeitRound,
       requestRematch,
-      respondRematch,
-      dismissRematchPrompt,
-      continueRematch,
-      forfeitRematch,
-      endTieDueDisconnect
+      voteRematch
     },
     savedName
   };

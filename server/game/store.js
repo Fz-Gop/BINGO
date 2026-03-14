@@ -1,12 +1,12 @@
-import { createRoom, createPlayer } from "./logic.js";
-import { generateCode, otherRole } from "./utils.js";
+import { createPlayer, createRoom, getPlayer, getRoomPlayers } from "./logic.js";
+import { PRECONFIG_JOIN_LIMIT, generateCode } from "./utils.js";
 
 const rooms = new Map();
 const cleanupTimers = new Map();
 const ROOM_CLEANUP_TTL_MS = 30 * 60 * 1000;
 
 export function getRoom(code) {
-  return rooms.get(code);
+  return rooms.get(code) ?? null;
 }
 
 export function listRooms() {
@@ -15,8 +15,8 @@ export function listRooms() {
 
 export function createRoomForPlayer({ playerId, name, socketId }) {
   const code = generateCode(rooms);
-  const room = createRoom(code);
-  room.players.A = createPlayer({ id: playerId, name, role: "A", socketId });
+  const hostPlayer = createPlayer({ id: playerId, name, seat: 1, socketId });
+  const room = createRoom(code, hostPlayer);
   rooms.set(code, room);
   return room;
 }
@@ -29,27 +29,32 @@ export function joinRoom({ code, playerId, name, socketId }) {
 
   clearRoomCleanup(code);
 
-  // Rejoin if same player ID exists
-  const existingRole = findRoleByPlayerId(room, playerId);
-  if (existingRole) {
-    if (room.players[existingRole]?.left) {
+  const existingPlayer = room.players.find((player) => player.id === playerId);
+  if (existingPlayer) {
+    if (existingPlayer.left) {
       return { error: "You already left this room." };
     }
-    attachSocket(room, existingRole, socketId);
-    if (name) room.players[existingRole].name = name;
-    return { room, role: existingRole, rejoined: true };
+    attachSocket(room, existingPlayer.id, socketId, name);
+    return { room, playerId: existingPlayer.id, rejoined: true };
   }
 
-  if (!room.players.A) {
-    room.players.A = createPlayer({ id: playerId, name, role: "A", socketId });
-    return { room, role: "A" };
-  }
-  if (!room.players.B) {
-    room.players.B = createPlayer({ id: playerId, name, role: "B", socketId });
-    return { room, role: "B" };
+  if (room.config.locked) {
+    return { error: "Room is locked." };
   }
 
-  return { error: "Room is full." };
+  const nonLeftPlayers = room.players.filter((player) => !player.left);
+  const joinLimit = room.config.configured
+    ? room.config.maxPlayersConfigured
+    : PRECONFIG_JOIN_LIMIT;
+
+  if (nonLeftPlayers.length >= joinLimit) {
+    return { error: room.config.configured ? "Room is full." : "Room is waiting for host configuration." };
+  }
+
+  const seat = getRoomPlayers(room).length + 1;
+  const player = createPlayer({ id: playerId, name, seat, socketId });
+  room.players.push(player);
+  return { room, playerId: player.id, rejoined: false };
 }
 
 export function rejoinRoom({ code, playerId, socketId }) {
@@ -57,64 +62,44 @@ export function rejoinRoom({ code, playerId, socketId }) {
   if (!room) {
     return { error: "Room not found." };
   }
-  const role = findRoleByPlayerId(room, playerId);
-  if (!role) {
+
+  const player = room.players.find((entry) => entry.id === playerId);
+  if (!player) {
     return { error: "Player not found in room." };
   }
-  if (room.players[role]?.left) {
+  if (player.left) {
     return { error: "You already left this room." };
   }
+
   clearRoomCleanup(code);
-  const wasDisconnected = room.players[role]?.connected === false;
-  attachSocket(room, role, socketId);
-  if (room.players.A?.connected && room.players.B?.connected) {
-    room.disconnect = { A: false, B: false };
-    if (room.status === "in_match") {
-      room.paused = false;
-    }
-  }
-  return { room, role, rejoined: true, wasDisconnected };
+  const wasDisconnected = !player.connected;
+  attachSocket(room, player.id, socketId);
+
+  return { room, playerId: player.id, wasDisconnected };
+}
+
+export function attachSocket(room, playerId, socketId, name) {
+  const player = getPlayer(room, playerId);
+  if (!player) return null;
+  player.socketId = socketId;
+  player.connected = true;
+  player.disconnectDeadline = null;
+  if (name) player.name = name;
+  clearRoomCleanup(room.code);
+  return player;
 }
 
 export function detachSocket(room, socketId) {
-  const role = findRoleBySocketId(room, socketId);
-  if (!role) return null;
-  room.players[role].connected = false;
-  room.players[role].socketId = null;
-  scheduleRoomCleanupIfIdle(room.code);
-  return role;
-}
-
-export function attachSocket(room, role, socketId) {
-  const player = room.players[role];
-  if (!player) return;
-  clearRoomCleanup(room.code);
-  player.socketId = socketId;
-  player.connected = true;
-  player.left = false;
-  room.disconnect[role] = false;
-}
-
-export function markPlayerLeft(room, role) {
-  const player = room.players[role];
-  if (!player) return;
-  player.connected = false;
+  const player = room.players.find((entry) => entry.socketId === socketId);
+  if (!player) return null;
   player.socketId = null;
-  player.left = true;
-  room.ready[role] = false;
-  room.disconnect[role] = false;
+  player.connected = false;
+  scheduleRoomCleanupIfIdle(room.code);
+  return player;
 }
 
-export function findRoleByPlayerId(room, playerId) {
-  if (room.players.A?.id === playerId) return "A";
-  if (room.players.B?.id === playerId) return "B";
-  return null;
-}
-
-export function findRoleBySocketId(room, socketId) {
-  if (room.players.A?.socketId === socketId) return "A";
-  if (room.players.B?.socketId === socketId) return "B";
-  return null;
+export function findPlayerBySocketId(room, socketId) {
+  return room.players.find((player) => player.socketId === socketId) ?? null;
 }
 
 export function maybeRemoveRoom(code) {
@@ -126,10 +111,6 @@ export function maybeRemoveRoom(code) {
   }
 }
 
-export function getOpponentRole(role) {
-  return otherRole(role);
-}
-
 export function scheduleRoomCleanupIfIdle(code) {
   const room = rooms.get(code);
   if (!room) return;
@@ -138,14 +119,14 @@ export function scheduleRoomCleanupIfIdle(code) {
     rooms.delete(code);
     return;
   }
-  if (hasConnectedPlayers(room)) return;
+  if (room.players.some((player) => player.connected)) return;
   if (cleanupTimers.has(code)) return;
 
   const timeout = setTimeout(() => {
     cleanupTimers.delete(code);
     const latest = rooms.get(code);
     if (!latest) return;
-    if (hasConnectedPlayers(latest)) return;
+    if (latest.players.some((player) => player.connected)) return;
     rooms.delete(code);
   }, ROOM_CLEANUP_TTL_MS);
 
@@ -154,19 +135,12 @@ export function scheduleRoomCleanupIfIdle(code) {
 
 export function clearRoomCleanup(code) {
   const timer = cleanupTimers.get(code);
-  if (timer) {
-    clearTimeout(timer);
-    cleanupTimers.delete(code);
-  }
-}
-
-function hasConnectedPlayers(room) {
-  return Boolean(room.players.A?.connected || room.players.B?.connected);
+  if (!timer) return;
+  clearTimeout(timer);
+  cleanupTimers.delete(code);
 }
 
 function canDeleteImmediately(room) {
-  const players = [room.players.A, room.players.B].filter(Boolean);
-  if (players.length === 0) return true;
-  if (players.some((player) => player.connected)) return false;
-  return players.every((player) => player.left);
+  if (room.players.length === 0) return true;
+  return room.players.every((player) => player.left);
 }

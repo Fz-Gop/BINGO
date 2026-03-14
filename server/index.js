@@ -6,26 +6,45 @@ import express from "express";
 import { Server as SocketIOServer } from "socket.io";
 
 import {
-  appendLog,
-  applyCall,
-  canStartMatch,
-  endMatch,
-  startMatch
+  appendEventLog,
+  canHostStart,
+  canStartReadyRound,
+  castRematchVote,
+  configureRoom,
+  createRematchVote,
+  expireRematchVote,
+  forfeitRound,
+  getNonLeftPlayers,
+  getPlayer,
+  leaveRoom,
+  markPlayerDisconnected,
+  reconnectPlayer,
+  setPlayerReady,
+  startFirstMatch,
+  startNextRound,
+  timeoutPlayer,
+  applyCall
 } from "./game/logic.js";
 import {
   clearRoomCleanup,
   createRoomForPlayer,
   detachSocket,
-  findRoleBySocketId,
+  findPlayerBySocketId,
+  getRoom,
   joinRoom,
   listRooms,
-  markPlayerLeft,
   maybeRemoveRoom,
   rejoinRoom,
   scheduleRoomCleanupIfIdle
 } from "./game/store.js";
 import { toPlayerView } from "./game/serialize.js";
-import { otherRole } from "./game/utils.js";
+import {
+  DISCONNECT_GRACE_MS,
+  PLAYABLE_BOARD_SIZES,
+  PLAYABLE_PLAYER_COUNTS,
+  REMATCH_VOTE_MS,
+  now
+} from "./game/utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,8 +55,6 @@ const HOST = process.env.HOST || "0.0.0.0";
 const app = express();
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// In "play" mode we serve the built client from server so the other laptop
-// only needs to open one URL/port.
 if (process.env.NODE_ENV === "production") {
   const clientDist = path.resolve(__dirname, "..", "client", "dist");
   app.use(express.static(clientDist));
@@ -58,21 +75,14 @@ const io = new SocketIOServer(httpServer, {
         }
 });
 
-function createPendingRematch(role) {
-  return {
-    phase: "pending-response",
-    requester: role,
-    responder: otherRole(role),
-    responderPrompt: "open"
-  };
-}
+const disconnectTimers = new Map();
+const rematchVoteTimers = new Map();
 
 function emitState(room) {
-  ["A", "B"].forEach((role) => {
-    const player = room.players[role];
-    if (!player?.socketId) return;
+  room.players.forEach((player) => {
+    if (!player.socketId || player.left) return;
     io.to(player.socketId).emit("room:state", {
-      view: toPlayerView(room, role)
+      view: toPlayerView(room, player.id)
     });
   });
 }
@@ -85,219 +95,294 @@ function emitLeft(socket) {
   socket.emit("room:left");
 }
 
-io.on("connection", (socket) => {
-  // eslint-disable-next-line no-console
-  console.log("Socket connected", { id: socket.id, origin: socket.handshake.headers.origin });
+function locateRoomBySocket(socketId) {
+  for (const room of listRooms().values()) {
+    const player = findPlayerBySocketId(room, socketId);
+    if (player) {
+      return { room, player };
+    }
+  }
+  return { room: null, player: null };
+}
 
+function clearDisconnectTimer(roomCode, playerId) {
+  const key = `${roomCode}:${playerId}`;
+  const timeout = disconnectTimers.get(key);
+  if (!timeout) return;
+  clearTimeout(timeout);
+  disconnectTimers.delete(key);
+}
+
+function clearRematchVoteTimer(roomCode) {
+  const timeout = rematchVoteTimers.get(roomCode);
+  if (!timeout) return;
+  clearTimeout(timeout);
+  rematchVoteTimers.delete(roomCode);
+}
+
+function syncTimers(room) {
+  room.players.forEach((player) => {
+    if (!player.disconnectDeadline || player.left || player.connected) {
+      clearDisconnectTimer(room.code, player.id);
+      return;
+    }
+    scheduleDisconnectTimeout(room, player.id, player.disconnectDeadline);
+  });
+
+  if (!room.rematchVote) {
+    clearRematchVoteTimer(room.code);
+  } else {
+    scheduleRematchVoteTimeout(room, room.rematchVote.expiresAt);
+  }
+}
+
+function scheduleDisconnectTimeout(room, playerId, deadline) {
+  const key = `${room.code}:${playerId}`;
+  clearDisconnectTimer(room.code, playerId);
+  const delay = Math.max(0, deadline - now());
+  const timeout = setTimeout(() => {
+    disconnectTimers.delete(key);
+    const liveRoom = getRoom(room.code);
+    if (!liveRoom) return;
+    const player = getPlayer(liveRoom, playerId);
+    if (!player || player.left || player.connected) return;
+    if (player.disconnectDeadline !== deadline) return;
+
+    appendEventLog(liveRoom, { type: "timeout-left", playerId });
+    timeoutPlayer(liveRoom, playerId);
+    clearRematchVoteTimer(liveRoom.code);
+    syncTimers(liveRoom);
+    maybeRemoveRoom(liveRoom.code);
+    const latest = getRoom(liveRoom.code);
+    if (latest) {
+      emitState(latest);
+      scheduleRoomCleanupIfIdle(latest.code);
+    }
+  }, delay);
+  disconnectTimers.set(key, timeout);
+}
+
+function scheduleRematchVoteTimeout(room, expiresAt) {
+  clearRematchVoteTimer(room.code);
+  const delay = Math.max(0, expiresAt - now());
+  const timeout = setTimeout(() => {
+    rematchVoteTimers.delete(room.code);
+    const liveRoom = getRoom(room.code);
+    if (!liveRoom || !liveRoom.rematchVote) return;
+    if (liveRoom.rematchVote.expiresAt !== expiresAt) return;
+    expireRematchVote(liveRoom);
+    emitState(liveRoom);
+  }, delay);
+  rematchVoteTimers.set(room.code, timeout);
+}
+
+function cleanupRoomIfGone(room) {
+  maybeRemoveRoom(room.code);
+  const latest = getRoom(room.code);
+  if (!latest) {
+    clearRematchVoteTimer(room.code);
+    room.players.forEach((player) => clearDisconnectTimer(room.code, player.id));
+    return true;
+  }
+  return false;
+}
+
+function validateConfig({ maxPlayers, boardSize }, room) {
+  if (!PLAYABLE_PLAYER_COUNTS.includes(maxPlayers)) {
+    return "That player count is not available yet.";
+  }
+  if (!PLAYABLE_BOARD_SIZES.includes(boardSize)) {
+    return "That grid size is not available yet.";
+  }
+  if (maxPlayers < getNonLeftPlayers(room).length) {
+    return "You cannot configure fewer players than have already joined.";
+  }
+  return null;
+}
+
+io.on("connection", (socket) => {
   socket.on("room:create", ({ playerId, name }) => {
-    if (!playerId || !name) {
+    if (!playerId || !name?.trim()) {
       emitError(socket, "Name is required.");
       return;
     }
     const room = createRoomForPlayer({
       playerId,
-      name,
+      name: name.trim(),
       socketId: socket.id
     });
-    // eslint-disable-next-line no-console
-    console.log("Room created", { code: room.code, by: name });
     emitState(room);
   });
 
   socket.on("room:join", ({ code, playerId, name }) => {
-    if (!code || !playerId || !name) {
+    if (!code || !playerId || !name?.trim()) {
       emitError(socket, "Room code and name are required.");
       return;
     }
     const result = joinRoom({
-      code: code.toUpperCase(),
+      code: code.trim().toUpperCase(),
       playerId,
-      name,
+      name: name.trim(),
       socketId: socket.id
     });
     if (result.error) {
-      // eslint-disable-next-line no-console
-      console.log("Room join failed", { code, error: result.error });
       emitError(socket, result.error);
       return;
     }
-    // eslint-disable-next-line no-console
-    console.log("Room joined", { code: result.room.code, by: name });
     emitState(result.room);
   });
 
   socket.on("room:rejoin", ({ code, playerId }) => {
     if (!code || !playerId) return;
-    const result = rejoinRoom({ code: code.toUpperCase(), playerId, socketId: socket.id });
+    const result = rejoinRoom({
+      code: code.trim().toUpperCase(),
+      playerId,
+      socketId: socket.id
+    });
     if (result.error) {
       emitError(socket, result.error);
       return;
     }
-    if (result.wasDisconnected && result.room.status === "in_match") {
-      appendLog(result.room, { type: "reconnect", by: result.role });
+    reconnectPlayer(result.room, playerId, socket.id);
+    clearDisconnectTimer(result.room.code, playerId);
+    if (result.wasDisconnected) {
+      appendEventLog(result.room, { type: "reconnect", playerId });
     }
+    syncTimers(result.room);
     emitState(result.room);
   });
 
-  socket.on("room:ready", ({ ready }) => {
-    const { room, role } = locateRoomBySocket(socket.id);
-    if (!room) return;
-    if (room.status === "in_match") return;
-    room.ready[role] = Boolean(ready);
-    if (canStartMatch(room)) {
-      startMatch(room);
+  socket.on("room:configure", ({ maxPlayers, boardSize }) => {
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    if (room.hostPlayerId !== player.id || room.config.locked) {
+      emitError(socket, "Only the host can configure this room.");
+      return;
     }
+
+    const error = validateConfig({ maxPlayers, boardSize }, room);
+    if (error) {
+      emitError(socket, error);
+      return;
+    }
+
+    configureRoom(room, { maxPlayers, boardSize });
     emitState(room);
   });
 
-  socket.on("game:call", ({ number }) => {
-    const { room, role } = locateRoomBySocket(socket.id);
-    if (!room) return;
-    const result = applyCall(room, role, number);
+  socket.on("room:start", () => {
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    if (!canHostStart(room, player.id)) {
+      emitError(socket, "Only the host can start when at least two connected players are present.");
+      return;
+    }
+
+    const result = startFirstMatch(room);
     if (!result.ok) {
       emitError(socket, result.error);
       return;
     }
+
+    syncTimers(room);
+    emitState(room);
+  });
+
+  socket.on("room:ready", ({ ready }) => {
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    if (room.status !== "ended") return;
+    setPlayerReady(room, player.id, Boolean(ready));
+    if (canStartReadyRound(room)) {
+      startNextRound(room);
+    }
+    syncTimers(room);
+    emitState(room);
+  });
+
+  socket.on("game:call", ({ number }) => {
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    const result = applyCall(room, player.id, number);
+    if (!result.ok) {
+      emitError(socket, result.error);
+      return;
+    }
+    if (!room.rematchVote) {
+      clearRematchVoteTimer(room.code);
+    }
+    syncTimers(room);
+    emitState(room);
+  });
+
+  socket.on("game:forfeit", () => {
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    const result = forfeitRound(room, player.id);
+    if (!result.ok) {
+      emitError(socket, result.error);
+      return;
+    }
+    if (!room.rematchVote) {
+      clearRematchVoteTimer(room.code);
+    }
+    syncTimers(room);
     emitState(room);
   });
 
   socket.on("game:rematch:request", () => {
-    const { room, role } = locateRoomBySocket(socket.id);
-    if (!room || room.status !== "in_match") return;
-    if (room.paused || room.rematch) return;
-    room.rematch = createPendingRematch(role);
-    appendLog(room, { type: "rematch-requested", by: role });
-    emitState(room);
-  });
-
-  socket.on("game:rematch:respond", ({ accept }) => {
-    const { room, role } = locateRoomBySocket(socket.id);
-    if (!room || room.status !== "in_match") return;
-    if (!room.rematch || room.rematch.phase !== "pending-response") return;
-    if (room.rematch.requester === role) return;
-    if (accept) {
-      appendLog(room, { type: "rematch-accepted", by: role });
-      endMatch(room, { type: "tie" });
-    } else {
-      appendLog(room, { type: "rematch-declined", by: role });
-      room.rematch = {
-        phase: "decision-pending",
-        requester: room.rematch.requester,
-        responder: role
-      };
-    }
-    emitState(room);
-  });
-
-  socket.on("game:rematch:dismiss", () => {
-    const { room, role } = locateRoomBySocket(socket.id);
-    if (!room || room.status !== "in_match") return;
-    if (!room.rematch || room.rematch.phase !== "pending-response") return;
-    if (room.rematch.responder !== role) return;
-    room.rematch = { ...room.rematch, responderPrompt: "dismissed" };
-    emitState(room);
-  });
-
-  socket.on("game:rematch:continue", () => {
-    const { room, role } = locateRoomBySocket(socket.id);
-    if (!room || room.status !== "in_match") return;
-    if (!room.rematch || room.rematch.phase !== "decision-pending") return;
-    if (room.rematch.requester !== role) return;
-    appendLog(room, { type: "rematch-continued", by: role });
-    room.rematch = null;
-    emitState(room);
-  });
-
-  socket.on("game:rematch:forfeit", () => {
-    const { room, role } = locateRoomBySocket(socket.id);
-    if (!room || room.status !== "in_match") return;
-    if (!room.rematch || room.rematch.phase !== "decision-pending") return;
-    if (room.rematch.requester !== role) return;
-    appendLog(room, { type: "rematch-forfeited", by: role });
-    endMatch(room, { type: "forfeit", winnerRole: otherRole(role) });
-    emitState(room);
-  });
-
-  socket.on("game:tie:disconnect", () => {
-    const { room, role } = locateRoomBySocket(socket.id);
-    if (!room || room.status !== "in_match") return;
-    if (!room.paused) return;
-    const opponent = otherRole(role);
-    if (!room.disconnect[opponent]) return;
-    endMatch(room, { type: "tie" });
-    emitState(room);
-  });
-
-  socket.on("room:leave", ({ forfeit } = {}) => {
-    const { room, role, code } = locateRoomBySocket(socket.id);
-    if (!room || !role || !code) return;
-
-    const opponentRole = otherRole(role);
-    const opponentConnected = Boolean(room.players[opponentRole]?.connected);
-    const isActiveConnectedMatch =
-      room.status === "in_match" && !room.paused && opponentConnected;
-
-    if (isActiveConnectedMatch && !forfeit) {
-      emitError(socket, "Leaving now forfeits the match.");
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    const result = createRematchVote(room, player.id);
+    if (!result.ok) {
+      emitError(socket, result.error);
       return;
     }
+    scheduleRematchVoteTimeout(room, room.rematchVote.expiresAt);
+    emitState(room);
+  });
 
-    if (room.status === "in_match") {
-      appendLog(room, { type: "left-room", by: role });
-      if (isActiveConnectedMatch) {
-        endMatch(room, { type: "forfeit", winnerRole: opponentRole });
-      } else {
-        endMatch(room, { type: "tie" });
-      }
+  socket.on("game:rematch:vote", ({ vote }) => {
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    const result = castRematchVote(room, player.id, vote);
+    if (!result.ok) {
+      emitError(socket, result.error);
+      return;
     }
-
-    markPlayerLeft(room, role);
-    maybeRemoveRoom(code);
-
-    const liveRoom = getLiveRoom(code);
-    if (liveRoom) {
-      scheduleRoomCleanupIfIdle(code);
-      emitState(liveRoom);
+    if (result.restarted) {
+      clearRematchVoteTimer(room.code);
     } else {
-      clearRoomCleanup(code);
+      syncTimers(room);
     }
+    emitState(room);
+  });
+
+  socket.on("room:leave", () => {
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player) return;
+    clearDisconnectTimer(room.code, player.id);
+    appendEventLog(room, { type: "left-room", playerId: player.id });
+    leaveRoom(room, player.id);
     emitLeft(socket);
+    if (cleanupRoomIfGone(room)) {
+      return;
+    }
+    syncTimers(room);
+    emitState(room);
   });
 
   socket.on("disconnect", () => {
-    const { room, role, code } = locateRoomBySocket(socket.id);
-    if (!room || !role) return;
-    detachSocket(room, socket.id);
-    room.disconnect[role] = true;
-    if (
-      room.status === "in_match" &&
-      room.rematch &&
-      room.rematch.phase === "decision-pending"
-    ) {
-      appendLog(room, { type: "disconnect", by: role });
-      endMatch(room, { type: "forfeit", winnerRole: otherRole(role) });
-    } else if (room.status === "in_match") {
-      appendLog(room, { type: "disconnect", by: role });
-      room.paused = true;
-    }
+    const { room, player } = locateRoomBySocket(socket.id);
+    if (!room || !player || player.left) return;
+    const detached = detachSocket(room, socket.id);
+    if (!detached) return;
+    markPlayerDisconnected(room, player.id);
+    appendEventLog(room, { type: "disconnect", playerId: player.id });
+    scheduleDisconnectTimeout(room, player.id, getPlayer(room, player.id)?.disconnectDeadline ?? now() + DISCONNECT_GRACE_MS);
     emitState(room);
   });
 });
-
-function getLiveRoom(code) {
-  for (const [roomCode, room] of listRooms()) {
-    if (roomCode === code) return room;
-  }
-  return null;
-}
-
-function locateRoomBySocket(socketId) {
-  for (const [code, room] of listRooms()) {
-    const role = findRoleBySocketId(room, socketId);
-    if (role) return { room, role, code };
-  }
-  return { room: null, role: null, code: null };
-}
 
 httpServer.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console

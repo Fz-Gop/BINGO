@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { MatchResult, Role } from "../state/types";
+import type { MatchResult } from "../state/types";
 
 type AudioContextCtor = typeof AudioContext;
 type WindowWithWebkitAudio = Window & {
@@ -35,17 +35,17 @@ function scheduleTone(
   oscillator.stop(startTime + duration + 0.05);
 }
 
-function getResultTonePlan(result: MatchResult, yourRole: Role | undefined) {
-  if (!result) return null;
+function getTonePlan(result: MatchResult, selfPlayerId: string | undefined) {
+  if (!result || !selfPlayerId) return null;
 
-  if (result.type === "tie") {
+  if (result.awardedPointIds.length > 1) {
     return [392, 523.25, 392];
   }
 
-  const youWon = result.winnerRole === yourRole;
-  if (youWon) {
+  if (result.awardedPointIds.includes(selfPlayerId)) {
     return [523.25, 659.25, 783.99, 1046.5];
   }
+
   return [392, 329.63, 261.63];
 }
 
@@ -77,7 +77,7 @@ export function useResultSound() {
     };
   }, []);
 
-  function playResult(result: MatchResult, yourRole: Role | undefined) {
+  return function playResult(result: MatchResult, selfPlayerId: string | undefined) {
     if (!interactionReadyRef.current) return;
 
     const AudioCtor = getAudioContextCtor();
@@ -93,14 +93,12 @@ export function useResultSound() {
       void ctx.resume().catch(() => {});
     }
 
-    const plan = getResultTonePlan(result, yourRole);
+    const plan = getTonePlan(result, selfPlayerId);
     if (!plan) return;
 
     const start = ctx.currentTime + 0.02;
     plan.forEach((frequency, index) => {
       scheduleTone(ctx, frequency, start + index * 0.12, 0.18, 0.055);
     });
-  }
-
-  return playResult;
+  };
 }

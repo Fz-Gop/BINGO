@@ -1,57 +1,558 @@
-import { generateBoard, otherRole, now } from "./utils.js";
+import {
+  DISCONNECT_GRACE_MS,
+  REMATCH_VOTE_MS,
+  generateBoard,
+  now
+} from "./utils.js";
 
-export function createRoom(code) {
+export function createRoom(code, hostPlayer) {
   return {
     code,
-    players: { A: null, B: null },
-    status: "lobby", // lobby | in_match | ended
-    paused: false,
-    disconnect: { A: false, B: false },
-    ready: { A: false, B: false },
-    scores: { A: 0, B: 0 },
-    startingPlayer: "A",
-    currentTurn: "A",
-    boards: { A: [], B: [] },
-    calledNumbers: new Set(),
-    lines: { A: 0, B: 0 },
-    completedLines: { A: [], B: [] },
-    log: [],
-    lastResult: null, // { type: 'win'|'tie'|'forfeit', winnerRole?: 'A'|'B' }
-    rematch: null // { from: 'A'|'B', status: 'pending'|'declined' }
+    createdAt: now(),
+    sequence: 0,
+    status: "configuring",
+    hostPlayerId: hostPlayer.id,
+    config: {
+      configured: false,
+      maxPlayersConfigured: null,
+      boardSize: null,
+      locked: false
+    },
+    players: [hostPlayer],
+    eventLog: [],
+    rematchVote: null,
+    lastResult: null,
+    nextStartingPlayerId: hostPlayer.id,
+    round: createEmptyRound()
   };
 }
 
-export function createPlayer({ id, name, role, socketId }) {
+export function createPlayer({ id, name, seat, socketId }) {
   return {
     id,
     name,
-    role,
+    seat,
+    joinedAt: now(),
     socketId,
     connected: true,
-    left: false
+    left: false,
+    ready: false,
+    score: 0,
+    disconnectDeadline: null
   };
 }
 
-export function appendLog(room, entry) {
-  room.log.push({
-    id: `log-${room.log.length + 1}-${now()}`,
+export function createEmptyRound(number = 0) {
+  return {
+    number,
+    startingPlayerId: null,
+    currentTurnPlayerId: null,
+    pausedOnPlayerId: null,
+    activePlayerIds: [],
+    forfeitedPlayerIds: [],
+    boardsByPlayerId: {},
+    calledNumbers: [],
+    completedLinesByPlayerId: {},
+    lineCountsByPlayerId: {}
+  };
+}
+
+function nextId(room, prefix) {
+  room.sequence += 1;
+  return `${prefix}-${room.sequence}`;
+}
+
+export function appendEventLog(room, entry) {
+  room.eventLog.push({
+    id: nextId(room, "evt"),
     ts: now(),
     ...entry
   });
 }
 
-export function getCompletedLines(board, calledSet) {
+export function appendRematchLog(room, entry) {
+  if (!room.rematchVote) return;
+  room.rematchVote.log.push({
+    id: nextId(room, "rv"),
+    ts: now(),
+    ...entry
+  });
+}
+
+export function getRoomPlayers(room) {
+  return room.players.slice().sort((a, b) => a.seat - b.seat);
+}
+
+export function getNonLeftPlayers(room) {
+  return getRoomPlayers(room).filter((player) => !player.left);
+}
+
+export function getConnectedNonLeftPlayers(room) {
+  return getNonLeftPlayers(room).filter((player) => player.connected);
+}
+
+export function getPlayer(room, playerId) {
+  return room.players.find((player) => player.id === playerId) ?? null;
+}
+
+export function getCurrentRoundPlayers(room) {
+  const active = new Set(room.round.activePlayerIds);
+  return getRoomPlayers(room).filter((player) => active.has(player.id));
+}
+
+export function getOrderedRoundPlayerIds(room) {
+  return getCurrentRoundPlayers(room).map((player) => player.id);
+}
+
+export function getForfeitedPlayerIds(room) {
+  return room.round.forfeitedPlayerIds.slice();
+}
+
+export function getReadyToStartPlayers(room) {
+  return getConnectedNonLeftPlayers(room);
+}
+
+export function configureRoom(room, { maxPlayers, boardSize }) {
+  room.config = {
+    configured: true,
+    maxPlayersConfigured: maxPlayers,
+    boardSize,
+    locked: false
+  };
+  room.status = "lobby";
+}
+
+export function canHostStart(room, playerId) {
+  return (
+    room.status === "lobby" &&
+    !room.config.locked &&
+    room.hostPlayerId === playerId &&
+    room.config.configured &&
+    getReadyToStartPlayers(room).length >= 2
+  );
+}
+
+export function startFirstMatch(room) {
+  const starters = getReadyToStartPlayers(room);
+  if (starters.length < 2) {
+    return { ok: false, error: "At least two connected players are required." };
+  }
+
+  const starterIds = new Set(starters.map((player) => player.id));
+  room.players.forEach((player) => {
+    if (!starterIds.has(player.id)) {
+      player.left = true;
+      player.connected = false;
+      player.socketId = null;
+      player.disconnectDeadline = null;
+      player.ready = false;
+    }
+  });
+
+  room.config.maxPlayersConfigured = starters.length;
+  room.config.locked = true;
+  room.hostPlayerId = null;
+
+  startRound(room);
+  return { ok: true };
+}
+
+export function startRound(room) {
+  const boardSize = room.config.boardSize;
+  const roundPlayers = getNonLeftPlayers(room);
+  const roundIds = roundPlayers.map((player) => player.id);
+
+  if (roundIds.length < 2) {
+    return false;
+  }
+
+  const startingPlayerId = resolveStartingPlayer(room, roundIds);
+
+  room.round = {
+    number: room.round.number + 1,
+    startingPlayerId,
+    currentTurnPlayerId: startingPlayerId,
+    pausedOnPlayerId: null,
+    activePlayerIds: roundIds,
+    forfeitedPlayerIds: [],
+    boardsByPlayerId: Object.fromEntries(
+      roundIds.map((playerId) => [playerId, generateBoard(boardSize)])
+    ),
+    calledNumbers: [],
+    completedLinesByPlayerId: Object.fromEntries(roundIds.map((playerId) => [playerId, []])),
+    lineCountsByPlayerId: Object.fromEntries(roundIds.map((playerId) => [playerId, 0]))
+  };
+
+  room.status = "in_match";
+  room.eventLog = [];
+  room.rematchVote = null;
+  room.lastResult = null;
+
+  roundPlayers.forEach((player) => {
+    player.ready = false;
+  });
+
+  room.nextStartingPlayerId = getNextPlayerId(room, startingPlayerId, roundIds);
+
+  const starter = getPlayer(room, startingPlayerId);
+  if (starter && !starter.connected) {
+    room.round.pausedOnPlayerId = startingPlayerId;
+  }
+
+  return true;
+}
+
+export function setPlayerReady(room, playerId, ready) {
+  const player = getPlayer(room, playerId);
+  if (!player || player.left) return false;
+  player.ready = Boolean(ready);
+  return true;
+}
+
+export function canStartReadyRound(room) {
+  if (room.status !== "ended") return false;
+  const players = getNonLeftPlayers(room);
+  if (players.length < 2) return false;
+  if (players.some((player) => !player.connected)) return false;
+  return players.every((player) => player.ready);
+}
+
+export function startNextRound(room) {
+  return startRound(room);
+}
+
+export function applyCall(room, playerId, number) {
+  if (room.status !== "in_match") {
+    return { ok: false, error: "Round is not active." };
+  }
+
+  if (!Number.isInteger(number) || number < 1 || number > room.config.boardSize ** 2) {
+    return { ok: false, error: "Invalid number." };
+  }
+
+  if (room.round.currentTurnPlayerId !== playerId) {
+    return { ok: false, error: "Not your turn." };
+  }
+
+  if (room.round.pausedOnPlayerId) {
+    return { ok: false, error: "Round is waiting for a disconnected player." };
+  }
+
+  if (!room.round.activePlayerIds.includes(playerId)) {
+    return { ok: false, error: "You are not active in this round." };
+  }
+
+  if (room.round.calledNumbers.includes(number)) {
+    return { ok: false, error: "Number already called." };
+  }
+
+  room.round.calledNumbers.push(number);
+  appendEventLog(room, { type: "call", playerId, number });
+
+  const calledSet = new Set(room.round.calledNumbers);
+  room.round.activePlayerIds.forEach((activePlayerId) => {
+    const board = room.round.boardsByPlayerId[activePlayerId];
+    const completedLines = getCompletedLines(board, calledSet, room.config.boardSize);
+    room.round.completedLinesByPlayerId[activePlayerId] = completedLines;
+    room.round.lineCountsByPlayerId[activePlayerId] = completedLines.length;
+  });
+
+  const winners = room.round.activePlayerIds.filter(
+    (activePlayerId) => room.round.lineCountsByPlayerId[activePlayerId] >= room.config.boardSize
+  );
+
+  if (winners.length > 0) {
+    endRound(room, {
+      trigger: "lines",
+      winnerIds: winners,
+      awardedPointIds: winners,
+      activePlayerIds: room.round.activePlayerIds.slice()
+    });
+    return { ok: true, result: "ended" };
+  }
+
+  const advanced = advanceTurn(room, playerId);
+  if (!advanced.ok) {
+    return { ok: false, error: advanced.error };
+  }
+
+  return { ok: true, result: room.round.pausedOnPlayerId ? "paused" : "continue" };
+}
+
+export function forfeitRound(room, playerId) {
+  if (room.status !== "in_match") {
+    return { ok: false, error: "Round is not active." };
+  }
+  if (!room.round.activePlayerIds.includes(playerId)) {
+    return { ok: false, error: "You are not active in this round." };
+  }
+
+  const needsTurnAdvance =
+    room.round.currentTurnPlayerId === playerId || room.round.pausedOnPlayerId === playerId;
+
+  room.round.activePlayerIds = room.round.activePlayerIds.filter((id) => id !== playerId);
+  if (!room.round.forfeitedPlayerIds.includes(playerId)) {
+    room.round.forfeitedPlayerIds.push(playerId);
+  }
+  appendEventLog(room, { type: "forfeit", playerId });
+
+  return resolveAfterParticipantRemoval(room, playerId, needsTurnAdvance);
+}
+
+export function removePlayerFromRound(room, playerId) {
+  room.round.activePlayerIds = room.round.activePlayerIds.filter((id) => id !== playerId);
+  if (room.round.currentTurnPlayerId === playerId) {
+    room.round.currentTurnPlayerId = null;
+  }
+  if (room.round.pausedOnPlayerId === playerId) {
+    room.round.pausedOnPlayerId = null;
+  }
+}
+
+export function resolveAfterParticipantRemoval(room, playerId, needsTurnAdvance = false) {
+  const remainingIds = room.round.activePlayerIds.slice();
+
+  if (remainingIds.length === 1) {
+    const winnerId = remainingIds[0];
+    endRound(room, {
+      trigger: "last-player",
+      winnerIds: [winnerId],
+      awardedPointIds: [winnerId],
+      activePlayerIds: remainingIds
+    });
+    return { ok: true, ended: true };
+  }
+
+  if (remainingIds.length === 0) {
+    room.status = "ended";
+    room.lastResult = {
+      trigger: "empty",
+      winnerIds: [],
+      awardedPointIds: [],
+      activePlayerIds: [],
+      endedAt: now()
+    };
+    clearReady(room);
+    room.rematchVote = null;
+    return { ok: true, ended: true };
+  }
+
+  if (!needsTurnAdvance) {
+    return { ok: true, ended: false, paused: Boolean(room.round.pausedOnPlayerId) };
+  }
+
+  const advanced = advanceTurn(room, playerId);
+  return { ok: true, ended: false, paused: Boolean(room.round.pausedOnPlayerId), advanced };
+}
+
+export function endRound(room, result) {
+  room.status = "ended";
+  room.round.pausedOnPlayerId = null;
+  room.lastResult = {
+    ...result,
+    endedAt: now()
+  };
+  room.rematchVote = null;
+  clearReady(room);
+
+  const awarded = new Set(result.awardedPointIds);
+  room.players.forEach((player) => {
+    if (awarded.has(player.id)) {
+      player.score += 1;
+    }
+  });
+}
+
+export function clearReady(room) {
+  room.players.forEach((player) => {
+    if (!player.left) {
+      player.ready = false;
+    }
+  });
+}
+
+export function markPlayerDisconnected(room, playerId) {
+  const player = getPlayer(room, playerId);
+  if (!player || player.left) return false;
+  player.connected = false;
+  player.socketId = null;
+  player.disconnectDeadline = now() + DISCONNECT_GRACE_MS;
+
+  if (room.status === "in_match" && room.round.currentTurnPlayerId === playerId) {
+    room.round.pausedOnPlayerId = playerId;
+  }
+
+  return true;
+}
+
+export function reconnectPlayer(room, playerId, socketId) {
+  const player = getPlayer(room, playerId);
+  if (!player || player.left) {
+    return { ok: false, error: "Player cannot rejoin this room." };
+  }
+
+  player.connected = true;
+  player.socketId = socketId;
+  player.disconnectDeadline = null;
+
+  if (room.status === "in_match" && room.round.pausedOnPlayerId === playerId) {
+    room.round.pausedOnPlayerId = null;
+  }
+
+  return { ok: true };
+}
+
+export function timeoutPlayer(room, playerId) {
+  const player = getPlayer(room, playerId);
+  if (!player || player.left) return { ok: false };
+
+  player.left = true;
+  player.connected = false;
+  player.socketId = null;
+  player.disconnectDeadline = null;
+  player.ready = false;
+
+  if (!room.config.locked) {
+    if (room.hostPlayerId === playerId) {
+      room.hostPlayerId = getOldestRemainingPlayerId(room);
+    }
+    if (getNonLeftPlayers(room).length === 0) {
+      return { ok: true, removedFromRoom: true };
+    }
+    return { ok: true, removedFromRoom: false };
+  }
+
+  if (room.status === "in_match") {
+    const needsTurnAdvance =
+      room.round.currentTurnPlayerId === playerId || room.round.pausedOnPlayerId === playerId;
+    removePlayerFromRound(room, playerId);
+    const outcome = resolveAfterParticipantRemoval(room, playerId, needsTurnAdvance);
+    return { ok: true, removedFromRoom: false, roundOutcome: outcome };
+  }
+
+  if (room.status === "ended" && canStartReadyRound(room)) {
+    startNextRound(room);
+  }
+
+  return { ok: true, removedFromRoom: false };
+}
+
+export function leaveRoom(room, playerId) {
+  const player = getPlayer(room, playerId);
+  if (!player || player.left) return { ok: false, error: "Player already left." };
+
+  player.left = true;
+  player.connected = false;
+  player.socketId = null;
+  player.disconnectDeadline = null;
+  player.ready = false;
+
+  if (!room.config.locked) {
+    if (room.hostPlayerId === playerId) {
+      room.hostPlayerId = getOldestRemainingPlayerId(room);
+    }
+    return { ok: true, roomEmpty: getNonLeftPlayers(room).length === 0 };
+  }
+
+  if (room.status === "in_match") {
+    const needsTurnAdvance =
+      room.round.currentTurnPlayerId === playerId || room.round.pausedOnPlayerId === playerId;
+    removePlayerFromRound(room, playerId);
+    const outcome = resolveAfterParticipantRemoval(room, playerId, needsTurnAdvance);
+    return { ok: true, roomEmpty: getNonLeftPlayers(room).length === 0, roundOutcome: outcome };
+  }
+
+  if (room.status === "ended" && canStartReadyRound(room)) {
+    startNextRound(room);
+  }
+
+  return { ok: true, roomEmpty: getNonLeftPlayers(room).length === 0 };
+}
+
+export function createRematchVote(room, playerId) {
+  if (room.status !== "in_match") {
+    return { ok: false, error: "Round must be active for rematch voting." };
+  }
+  if (room.rematchVote) {
+    return { ok: false, error: "A rematch vote is already active." };
+  }
+  const player = getPlayer(room, playerId);
+  if (!player || player.left) {
+    return { ok: false, error: "Only room participants can request a rematch." };
+  }
+
+  const voterIds = getNonLeftPlayers(room).map((roomPlayer) => roomPlayer.id);
+  room.rematchVote = {
+    requesterId: playerId,
+    startedAt: now(),
+    expiresAt: now() + REMATCH_VOTE_MS,
+    voterIds,
+    votes: {
+      [playerId]: "accept"
+    },
+    log: [
+      {
+        id: nextId(room, "rv"),
+        ts: now(),
+        type: "request",
+        playerId
+      }
+    ]
+  };
+
+  return { ok: true };
+}
+
+export function castRematchVote(room, playerId, vote) {
+  if (!room.rematchVote) {
+    return { ok: false, error: "No active rematch vote." };
+  }
+  if (!room.rematchVote.voterIds.includes(playerId)) {
+    return { ok: false, error: "You are not eligible to vote." };
+  }
+  if (room.rematchVote.votes[playerId]) {
+    return { ok: false, error: "Your vote is already recorded." };
+  }
+  if (vote !== "accept" && vote !== "decline") {
+    return { ok: false, error: "Invalid vote." };
+  }
+
+  room.rematchVote.votes[playerId] = vote;
+  appendRematchLog(room, {
+    type: vote,
+    playerId
+  });
+
+  const everyoneAccepted = room.rematchVote.voterIds.every(
+    (voterId) => room.rematchVote?.votes[voterId] === "accept"
+  );
+
+  if (everyoneAccepted) {
+    room.rematchVote = null;
+    startRound(room);
+    return { ok: true, restarted: true };
+  }
+
+  return { ok: true, restarted: false };
+}
+
+export function expireRematchVote(room) {
+  if (!room.rematchVote) return false;
+  room.rematchVote = null;
+  return true;
+}
+
+export function getCompletedLines(board, calledSet, boardSize) {
   const completed = [];
 
-  for (let r = 0; r < 5; r += 1) {
+  for (let r = 0; r < boardSize; r += 1) {
     const cells = [];
     let complete = true;
-    for (let c = 0; c < 5; c += 1) {
-      const cellIndex = r * 5 + c;
+    for (let c = 0; c < boardSize; c += 1) {
+      const cellIndex = r * boardSize + c;
       cells.push(cellIndex);
       if (!calledSet.has(board[cellIndex])) {
         complete = false;
-        break;
       }
     }
     if (complete) {
@@ -64,15 +565,14 @@ export function getCompletedLines(board, calledSet) {
     }
   }
 
-  for (let c = 0; c < 5; c += 1) {
+  for (let c = 0; c < boardSize; c += 1) {
     const cells = [];
     let complete = true;
-    for (let r = 0; r < 5; r += 1) {
-      const cellIndex = r * 5 + c;
+    for (let r = 0; r < boardSize; r += 1) {
+      const cellIndex = r * boardSize + c;
       cells.push(cellIndex);
       if (!calledSet.has(board[cellIndex])) {
         complete = false;
-        break;
       }
     }
     if (complete) {
@@ -85,111 +585,85 @@ export function getCompletedLines(board, calledSet) {
     }
   }
 
-  const diagonals = [
-    { id: "diag-0", index: 0, cells: [0, 6, 12, 18, 24] },
-    { id: "diag-1", index: 1, cells: [4, 8, 12, 16, 20] }
-  ];
-  diagonals.forEach((diag) => {
-    if (diag.cells.every((cellIndex) => calledSet.has(board[cellIndex]))) {
-      completed.push({
-        id: diag.id,
-        type: "diag",
-        index: diag.index,
-        cells: diag.cells
-      });
-    }
-  });
+  const leading = Array.from({ length: boardSize }, (_, index) => index * (boardSize + 1));
+  if (leading.every((cellIndex) => calledSet.has(board[cellIndex]))) {
+    completed.push({
+      id: "diag-0",
+      type: "diag",
+      index: 0,
+      cells: leading
+    });
+  }
+
+  const trailing = Array.from(
+    { length: boardSize },
+    (_, index) => (index + 1) * (boardSize - 1)
+  );
+  if (trailing.every((cellIndex) => calledSet.has(board[cellIndex]))) {
+    completed.push({
+      id: "diag-1",
+      type: "diag",
+      index: 1,
+      cells: trailing
+    });
+  }
 
   return completed;
 }
 
-export function canStartMatch(room) {
-  return (
-    room.players.A &&
-    room.players.B &&
-    !room.players.A.left &&
-    !room.players.B.left &&
-    room.ready.A &&
-    room.ready.B
-  );
+function resolveStartingPlayer(room, eligibleIds) {
+  const orderedIds = sortIdsBySeat(room, eligibleIds);
+  if (room.nextStartingPlayerId && orderedIds.includes(room.nextStartingPlayerId)) {
+    return room.nextStartingPlayerId;
+  }
+  if (room.round.startingPlayerId) {
+    return getNextPlayerId(room, room.round.startingPlayerId, orderedIds);
+  }
+  return orderedIds[0];
 }
 
-export function startMatch(room) {
-  room.status = "in_match";
-  room.paused = false;
-  room.disconnect = { A: false, B: false };
-  room.boards = { A: generateBoard(), B: generateBoard() };
-  room.calledNumbers = new Set();
-  room.lines = { A: 0, B: 0 };
-  room.completedLines = { A: [], B: [] };
-  room.log = [];
-  room.lastResult = null;
-  room.rematch = null;
-  room.currentTurn = room.startingPlayer;
+export function getNextPlayerId(room, fromPlayerId, eligibleIds) {
+  const orderedIds = sortIdsBySeat(room, eligibleIds);
+  if (orderedIds.length === 0) return null;
+
+  const currentIndex = orderedIds.indexOf(fromPlayerId);
+  if (currentIndex >= 0) {
+    return orderedIds[(currentIndex + 1) % orderedIds.length];
+  }
+
+  const fromSeat = getPlayer(room, fromPlayerId)?.seat ?? -Infinity;
+  const nextBySeat = orderedIds.find((playerId) => (getPlayer(room, playerId)?.seat ?? 0) > fromSeat);
+  return nextBySeat ?? orderedIds[0];
 }
 
-export function endMatch(room, result) {
-  room.status = "ended";
-  room.paused = false;
-  room.ready = { A: false, B: false };
-  room.lastResult = result;
-  room.rematch = null;
-
-  if (result?.type === "win" && result.winnerRole) {
-    room.scores[result.winnerRole] += 1;
-  }
-  if (result?.type === "forfeit" && result.winnerRole) {
-    room.scores[result.winnerRole] += 1;
+export function advanceTurn(room, fromPlayerId) {
+  const orderedActiveIds = sortIdsBySeat(room, room.round.activePlayerIds);
+  if (orderedActiveIds.length === 0) {
+    return { ok: false, error: "No active players remain." };
   }
 
-  // Alternate who starts next match regardless of outcome.
-  room.startingPlayer = otherRole(room.startingPlayer);
+  const nextPlayerId = getNextPlayerId(room, fromPlayerId, orderedActiveIds);
+  if (!nextPlayerId) {
+    return { ok: false, error: "Unable to resolve next turn." };
+  }
+
+  room.round.currentTurnPlayerId = nextPlayerId;
+  const nextPlayer = getPlayer(room, nextPlayerId);
+  if (nextPlayer && !nextPlayer.connected) {
+    room.round.pausedOnPlayerId = nextPlayerId;
+  } else {
+    room.round.pausedOnPlayerId = null;
+  }
+
+  return { ok: true };
 }
 
-export function applyCall(room, role, number) {
-  if (room.status !== "in_match") {
-    return { ok: false, error: "Match is not active." };
-  }
-  if (room.paused) {
-    return { ok: false, error: "Match is paused (opponent disconnected)." };
-  }
-  if (room.rematch) {
-    return { ok: false, error: "Resolve the rematch prompt before continuing." };
-  }
-  if (!Number.isInteger(number) || number < 1 || number > 25) {
-    return { ok: false, error: "Invalid number." };
-  }
-  if (room.currentTurn !== role) {
-    return { ok: false, error: "Not your turn." };
-  }
-  if (room.calledNumbers.has(number)) {
-    return { ok: false, error: "Number already called." };
-  }
+export function getOldestRemainingPlayerId(room) {
+  return getNonLeftPlayers(room)[0]?.id ?? null;
+}
 
-  room.calledNumbers.add(number);
-  appendLog(room, { type: "call", by: role, number });
-
-  room.completedLines.A = getCompletedLines(room.boards.A, room.calledNumbers);
-  room.completedLines.B = getCompletedLines(room.boards.B, room.calledNumbers);
-  room.lines.A = room.completedLines.A.length;
-  room.lines.B = room.completedLines.B.length;
-
-  const aWin = room.lines.A >= 5;
-  const bWin = room.lines.B >= 5;
-
-  if (aWin && bWin) {
-    endMatch(room, { type: "tie" });
-    return { ok: true, result: "tie" };
-  }
-  if (aWin) {
-    endMatch(room, { type: "win", winnerRole: "A" });
-    return { ok: true, result: "win", winnerRole: "A" };
-  }
-  if (bWin) {
-    endMatch(room, { type: "win", winnerRole: "B" });
-    return { ok: true, result: "win", winnerRole: "B" };
-  }
-
-  room.currentTurn = otherRole(room.currentTurn);
-  return { ok: true, result: "continue" };
+function sortIdsBySeat(room, ids) {
+  return ids
+    .slice()
+    .sort((leftId, rightId) => (getPlayer(room, leftId)?.seat ?? 0) - (getPlayer(room, rightId)?.seat ?? 0));
 }

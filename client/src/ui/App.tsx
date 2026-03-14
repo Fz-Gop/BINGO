@@ -1,10 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode
+} from "react";
 import { useGameState } from "../state/useGameState";
 import type {
   CompletedLine,
-  MatchLogEntry,
+  EventLogEntry,
   MatchResult,
-  Role,
+  PlayerView,
+  RematchLogEntry,
   RoomView
 } from "../state/types";
 import { useResultSound } from "./useResultSound";
@@ -20,8 +28,16 @@ export function App() {
     <div className="page">
       <header className="topbar">
         <div>
-          <h1>Bingo (2 Player)</h1>
-          {view?.code ? <div className="room-code">Room: {view.code}</div> : null}
+          <div className="eyebrow">Realtime multiplayer</div>
+          <h1>Bingo Room</h1>
+          {view ? (
+            <div className="topbar-meta">
+              Room {view.code}
+              {view.roundNumber > 0 ? ` · Round ${view.roundNumber}` : ""}
+            </div>
+          ) : (
+            <div className="topbar-meta">Create a room, share the code, and play live.</div>
+          )}
         </div>
         <div className={`pill pill--${status}`}>
           {status === "connected"
@@ -36,28 +52,31 @@ export function App() {
 
       {!view ? (
         <Welcome
+          savedName={savedName}
           onCreate={actions.createRoom}
           onJoin={actions.joinRoom}
-          savedName={savedName}
-          error={error}
         />
+      ) : view.status === "configuring" ? (
+        <ConfiguringScreen view={view} actions={actions} />
+      ) : view.status === "lobby" ? (
+        <LobbyScreen view={view} actions={actions} />
       ) : (
-        <GameScreen view={view} actions={actions} />
+        <RoundScreen view={view} actions={actions} />
       )}
     </div>
   );
 }
 
+type GameActions = ReturnType<typeof useGameState>["actions"];
+
 function Welcome({
-  onCreate,
-  onJoin,
   savedName,
-  error
+  onCreate,
+  onJoin
 }: {
+  savedName: string;
   onCreate: (name: string) => void;
   onJoin: (code: string, name: string) => void;
-  savedName: string;
-  error: string | null;
 }) {
   const [name, setName] = useState(savedName);
   const [code, setCode] = useState("");
@@ -87,15 +106,14 @@ function Welcome({
   }
 
   return (
-    <main className="welcome">
-      <section className="card welcome-hero">
-        <div className="welcome-eyebrow">Play together from one link</div>
-        <h2 className="section-title welcome-title">Create or join a Bingo room</h2>
-        <p className="welcome-copy">
-          Start a new room and share the code, or join instantly with the 4-letter code
-          from your opponent.
+    <main className="welcome-shell">
+      <section className="card hero-card">
+        <div className="hero-kicker">Room-based play</div>
+        <h2 className="hero-title">Create a room or join with a code</h2>
+        <p className="hero-copy">
+          The host sets the room up first. After that, everyone joins with the shared code and
+          plays on the same live board state.
         </p>
-
         <label className="field">
           <span>Your Name</span>
           <input
@@ -111,27 +129,23 @@ function Welcome({
       </section>
 
       <section className="welcome-grid">
-        <article className="card welcome-option">
-          <div className="welcome-option__kicker">Host</div>
-          <h3 className="welcome-option__title">Create Room</h3>
-          <p className="welcome-option__copy">
-            Start a fresh room here, then send the generated code to the other player.
+        <article className="card option-card">
+          <div className="option-kicker">Host</div>
+          <h3>Create Room</h3>
+          <p>
+            Get a room code immediately, then configure player count and grid size before the
+            first round starts.
           </p>
-          <div className="welcome-option__footer">
-            <button className="btn primary" onClick={handleCreate}>
-              Create Room
-            </button>
-            <div className="welcome-option__hint">You will become Player A automatically.</div>
-            {createError ? <div className="inline-error">{createError}</div> : null}
-          </div>
+          <button className="btn primary" onClick={handleCreate}>
+            Create Room
+          </button>
+          {createError ? <div className="inline-error">{createError}</div> : null}
         </article>
 
-        <article className="card welcome-option">
-          <div className="welcome-option__kicker">Guest</div>
-          <h3 className="welcome-option__title">Join Room</h3>
-          <p className="welcome-option__copy">
-            Enter the 4-letter code shared by the host to join the exact room.
-          </p>
+        <article className="card option-card">
+          <div className="option-kicker">Join</div>
+          <h3>Join Room</h3>
+          <p>Enter the host&apos;s room code. If the host is still configuring, you will wait there.</p>
           <label className="field">
             <span>Room Code</span>
             <input
@@ -144,46 +158,210 @@ function Welcome({
               maxLength={4}
             />
           </label>
-          <div className="welcome-option__footer">
-            <button className="btn" onClick={handleJoin}>
-              Join Room
-            </button>
-            <div className="welcome-option__hint">Room codes are 4 letters and case-insensitive.</div>
-            {joinError ? <div className="inline-error">{joinError}</div> : null}
-            {!joinError && error ? <div className="inline-error">{error}</div> : null}
-          </div>
+          <button className="btn" onClick={handleJoin}>
+            Join Room
+          </button>
+          {joinError ? <div className="inline-error">{joinError}</div> : null}
         </article>
       </section>
     </main>
   );
 }
 
-function GameScreen({
-  view,
-  actions
-}: {
-  view: RoomView;
-  actions: {
-    setReady: (ready: boolean) => void;
-    leaveRoom: (forfeit?: boolean) => void;
-    confirmCall: (number: number) => void;
-    requestRematch: () => void;
-    respondRematch: (accept: boolean) => void;
-    dismissRematchPrompt: () => void;
-    continueRematch: () => void;
-    forfeitRematch: () => void;
-    endTieDueDisconnect: () => void;
-  };
-}) {
-  const [selected, setSelected] = useState<number | null>(null);
+function ConfiguringScreen({ view, actions }: { view: RoomView; actions: GameActions }) {
+  const self = getSelfPlayer(view);
+  const [playerCount, setPlayerCount] = useState<number | null>(view.config.maxPlayersConfigured);
+  const [boardSize, setBoardSize] = useState<number | null>(view.config.boardSize);
+
+  useEffect(() => {
+    setPlayerCount(view.config.maxPlayersConfigured);
+    setBoardSize(view.config.boardSize);
+  }, [view.config.boardSize, view.config.maxPlayersConfigured]);
+
+  const minPlayers = view.joinedPlayerCount;
+  const canSave = Boolean(playerCount && boardSize && playerCount >= minPlayers);
+
+  return (
+    <main className="setup-layout">
+      <section className="card setup-main">
+        <div className="section-heading">
+          <div>
+            <div className="section-title">Configure room</div>
+            <div className="muted">Share the code now; players can join while you set it up.</div>
+          </div>
+          <div className="room-badge">Room {view.code}</div>
+        </div>
+
+        {self.isHost ? (
+          <>
+            <div className="setup-group">
+              <div className="setup-label">How many players?</div>
+              <div className="choice-row">
+                {view.config.playablePlayerCounts.map((count) => {
+                  const disabled = count < minPlayers;
+                  return (
+                    <button
+                      key={count}
+                      className={`choice-chip ${playerCount === count ? "choice-chip--selected" : ""}`}
+                      onClick={() => setPlayerCount(count)}
+                      disabled={disabled}
+                    >
+                      {count} players
+                    </button>
+                  );
+                })}
+                {view.config.comingSoonPlayerCounts.map((count) => (
+                  <button key={count} className="choice-chip choice-chip--soon" disabled>
+                    {count} players · Coming soon
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="setup-group">
+              <div className="setup-label">Grid size</div>
+              <div className="choice-row">
+                {view.config.playableBoardSizes.map((size) => (
+                  <button
+                    key={size}
+                    className={`choice-chip ${boardSize === size ? "choice-chip--selected" : ""}`}
+                    onClick={() => setBoardSize(size)}
+                  >
+                    {size} × {size}
+                  </button>
+                ))}
+                {view.config.comingSoonBoardSizes.map((size) => (
+                  <button key={size} className="choice-chip choice-chip--soon" disabled>
+                    {size} × {size} · Coming soon
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="row">
+              <button
+                className="btn primary"
+                onClick={() => {
+                  if (playerCount && boardSize) {
+                    actions.configureRoom(playerCount, boardSize);
+                  }
+                }}
+                disabled={!canSave}
+              >
+                Save room settings
+              </button>
+              {minPlayers > 1 ? (
+                <span className="muted">At least {minPlayers} joined players must fit the limit.</span>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <div className="waiting-card">
+            <div className="waiting-card__title">Room is being configured</div>
+            <p>
+              The host is choosing player count and grid size. You will move to the lobby as soon
+              as those settings are locked in.
+            </p>
+          </div>
+        )}
+      </section>
+
+      <section className="card roster-card">
+        <div className="section-title">Joined players</div>
+        <div className="player-list">
+          {view.players.map((player) => (
+            <PlayerListItem
+              key={player.id}
+              player={player}
+              selfPlayerId={view.selfPlayerId}
+              turnCount={0}
+              nowMs={Date.now()}
+              view={view}
+            />
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function LobbyScreen({ view, actions }: { view: RoomView; actions: GameActions }) {
+  const self = getSelfPlayer(view);
+  const configured = `${view.config.maxPlayersConfigured} players · ${view.config.boardSize}×${view.config.boardSize}`;
+  const joinedEnough = view.connectedPlayerCount >= 2;
+  const startingWithFewer =
+    view.config.maxPlayersConfigured !== null &&
+    view.connectedPlayerCount < view.config.maxPlayersConfigured;
+
+  return (
+    <main className="setup-layout">
+      <section className="card setup-main">
+        <div className="section-heading">
+          <div>
+            <div className="section-title">Lobby</div>
+            <div className="muted">{configured}</div>
+          </div>
+          <div className="room-badge">Room {view.code}</div>
+        </div>
+
+        {self.isHost ? (
+          <div className="waiting-card">
+            <div className="waiting-card__title">Host controls the first start</div>
+            <p>
+              Once the first round starts, the room locks and no new players can enter. Right now,
+              {startingWithFewer
+                ? ` you can start with the ${view.connectedPlayerCount} connected players already here.`
+                : " you are ready to start as soon as everyone is here."}
+            </p>
+            <button className="btn primary" onClick={() => actions.startRoom()} disabled={!joinedEnough}>
+              {startingWithFewer ? `Start with ${view.connectedPlayerCount} players` : "Start Round 1"}
+            </button>
+          </div>
+        ) : (
+          <div className="waiting-card">
+            <div className="waiting-card__title">Waiting for host to start</div>
+            <p>The host will begin the first round when they are ready.</p>
+          </div>
+        )}
+      </section>
+
+      <section className="card roster-card">
+        <div className="section-title">Players in room</div>
+        <div className="player-list">
+          {view.players.map((player) => (
+            <PlayerListItem
+              key={player.id}
+              player={player}
+              selfPlayerId={view.selfPlayerId}
+              turnCount={0}
+              nowMs={Date.now()}
+              view={view}
+            />
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function RoundScreen({ view, actions }: { view: RoomView; actions: GameActions }) {
+  const self = getSelfPlayer(view);
+  const playersById = useMemo(
+    () => Object.fromEntries(view.players.map((player) => [player.id, player])),
+    [view.players]
+  );
+  const calledSet = useMemo(() => new Set(view.calledNumbers), [view.calledNumbers]);
+  const activeRoundPlayers = view.players.filter((player) => player.currentRound.active);
+  const currentTurnPlayer = view.currentTurnPlayerId ? playersById[view.currentTurnPlayerId] : null;
+  const pausedPlayer = view.pausedOnPlayerId ? playersById[view.pausedOnPlayerId] : null;
+  const nowMs = useNowTick();
+  const [selectedNumber, setSelectedNumber] = useState<number | null>(null);
   const [animatedLineIds, setAnimatedLineIds] = useState<string[]>([]);
   const [isResultModalOpen, setIsResultModalOpen] = useState(false);
-  const [isIncomingRematchModalOpen, setIsIncomingRematchModalOpen] = useState(false);
-  const [isForfeitConfirmOpen, setIsForfeitConfirmOpen] = useState(false);
-  const [isLeaveRoomModalOpen, setIsLeaveRoomModalOpen] = useState(false);
+  const [isLeaveModalOpen, setIsLeaveModalOpen] = useState(false);
+  const [isForfeitModalOpen, setIsForfeitModalOpen] = useState(false);
   const [highlightedLogId, setHighlightedLogId] = useState<string | null>(null);
   const [hasUnreadLogs, setHasUnreadLogs] = useState(false);
-
   const previousLineIdsRef = useRef<string[] | null>(null);
   const previousStatusRef = useRef<RoomView["status"] | null>(null);
   const previousLogIdsRef = useRef<string[]>([]);
@@ -191,20 +369,47 @@ function GameScreen({
   const wasNearBottomRef = useRef(true);
   const playResultSound = useResultSound();
 
-  const yourRole = view.you?.role;
-  const isYourTurn = view.currentTurn === yourRole;
-  const inMatch = view.status === "in_match";
-  const opponentConnected = Boolean(view.opponent?.connected && !view.opponent?.left);
-  const canPlay = inMatch && !view.paused && !view.rematch && isYourTurn;
-  const isBoardHot = canPlay;
-  const calledSet = useMemo(() => new Set(view.calledNumbers), [view.calledNumbers]);
+  const isYourTurn =
+    view.status === "in_match" &&
+    view.currentTurnPlayerId === self.id &&
+    !view.pausedOnPlayerId &&
+    self.currentRound.active &&
+    self.connected;
+  const canConfirmCall = isYourTurn && selectedNumber !== null;
+  const canForfeit = view.status === "in_match" && self.currentRound.active && !self.left;
+  const rematchVote = view.rematchVote;
+  const yourVote = rematchVote?.votes[self.id];
+  const canVoteRematch =
+    view.status === "in_match" &&
+    Boolean(rematchVote && rematchVote.voterIds.includes(self.id) && !yourVote && !self.left);
+  const canRequestRematch = view.status === "in_match" && !rematchVote && !self.left;
+  const readyEligiblePlayers = view.players.filter((player) => !player.left);
+  const canReadyForNextRound = view.status === "ended" && readyEligiblePlayers.length >= 2 && !self.left;
+  const turnCounts = useMemo(() => getTurnCounts(view.eventLog), [view.eventLog]);
+  const resultPresentation = useMemo(
+    () => getResultPresentation(view.lastResult, self.id, playersById),
+    [view.lastResult, self.id, playersById]
+  );
+  const completedCellSet = useMemo(
+    () => new Set(view.completedLines.flatMap((line) => line.cells)),
+    [view.completedLines]
+  );
+  const animatedCellSet = useMemo(
+    () =>
+      new Set(
+        view.completedLines
+          .filter((line) => animatedLineIds.includes(line.id))
+          .flatMap((line) => line.cells)
+      ),
+    [animatedLineIds, view.completedLines]
+  );
 
   useEffect(() => {
-    setSelected(null);
+    setSelectedNumber(null);
     if (view.completedLines.length === 0) {
       setAnimatedLineIds([]);
     }
-  }, [view.board, view.code, view.status, view.completedLines.length]);
+  }, [view.board, view.roundNumber, view.completedLines.length]);
 
   useEffect(() => {
     const currentIds = view.completedLines.map((line) => line.id);
@@ -215,16 +420,11 @@ function GameScreen({
       if (freshIds.length > 0) {
         setAnimatedLineIds(freshIds);
         const timeout = window.setTimeout(() => {
-          setAnimatedLineIds((activeIds) =>
-            activeIds.filter((id) => !freshIds.includes(id))
-          );
+          setAnimatedLineIds((activeIds) => activeIds.filter((id) => !freshIds.includes(id)));
         }, LINE_ANIMATION_MS);
-
         previousLineIdsRef.current = currentIds;
         return () => window.clearTimeout(timeout);
       }
-    } else {
-      setAnimatedLineIds([]);
     }
 
     previousLineIdsRef.current = currentIds;
@@ -243,40 +443,17 @@ function GameScreen({
       previousStatusRef.current !== "ended" &&
       view.status === "ended"
     ) {
-      playResultSound(view.lastResult, yourRole);
-      setIsResultModalOpen(true);
-    }
-    if (!previousStatusRef.current && view.status === "ended") {
+      playResultSound(view.lastResult, self.id);
       setIsResultModalOpen(true);
     }
     previousStatusRef.current = view.status;
-  }, [playResultSound, view.lastResult, view.status, yourRole]);
-
-  useEffect(() => {
-    const isResponderPending =
-      view.rematch?.phase === "pending-response" &&
-      view.rematch.responder === yourRole &&
-      view.rematch.responderPrompt === "open";
-
-    setIsIncomingRematchModalOpen(Boolean(isResponderPending));
-
-    if (view.rematch?.phase !== "decision-pending") {
-      setIsForfeitConfirmOpen(false);
-    }
-  }, [view.rematch, yourRole]);
+  }, [playResultSound, self.id, view.lastResult, view.status]);
 
   useEffect(() => {
     const container = logScrollRef.current;
-    const currentIds = view.log.map((entry) => entry.id);
+    const currentIds = view.eventLog.map((entry) => entry.id);
     const previousIds = previousLogIdsRef.current;
     const wasNearBottom = wasNearBottomRef.current;
-
-    if (currentIds.length === 0) {
-      previousLogIdsRef.current = [];
-      setHasUnreadLogs(false);
-      wasNearBottomRef.current = true;
-      return;
-    }
 
     const newIds = currentIds.filter((id) => !previousIds.includes(id));
     if (newIds.length === 0) {
@@ -296,231 +473,218 @@ function GameScreen({
       const timeout = window.setTimeout(() => {
         setHighlightedLogId((current) => (current === newestId ? null : current));
       }, LOG_HIGHLIGHT_MS);
-
       previousLogIdsRef.current = currentIds;
       return () => window.clearTimeout(timeout);
     }
 
     setHasUnreadLogs(true);
-    wasNearBottomRef.current = false;
     previousLogIdsRef.current = currentIds;
     return undefined;
-  }, [view.log]);
+  }, [view.eventLog]);
 
-  const resultText = useMemo(
-    () => getResultPresentation(view.lastResult, yourRole),
-    [view.lastResult, yourRole]
-  );
-
-  const completedCellSet = useMemo(
-    () => new Set(view.completedLines.flatMap((line) => line.cells)),
-    [view.completedLines]
-  );
-
-  const animatedCellSet = useMemo(
-    () =>
-      new Set(
-        view.completedLines
-          .filter((line) => animatedLineIds.includes(line.id))
-          .flatMap((line) => line.cells)
-      ),
-    [animatedLineIds, view.completedLines]
-  );
-
-  const rematchUI = getRematchUI(view, yourRole);
-  const shouldConfirmLeave = inMatch && opponentConnected && !view.paused;
-  const nextMatchBlocked = Boolean(view.opponent?.left);
-  const { yourTurnCount, opponentTurnCount } = useMemo(() => {
-    let yours = 0;
-    let opponents = 0;
-
-    view.log.forEach((entry) => {
-      if (entry.type !== "call") return;
-      if (entry.by === yourRole) {
-        yours += 1;
-      } else {
-        opponents += 1;
-      }
-    });
-
-    return { yourTurnCount: yours, opponentTurnCount: opponents };
-  }, [view.log, yourRole]);
-
-  function handleLeaveRequest() {
-    if (shouldConfirmLeave) {
-      setIsLeaveRoomModalOpen(true);
-      return;
-    }
-    actions.leaveRoom(false);
-  }
+  const boardStyle = {
+    "--board-size": String(view.boardSize)
+  } as CSSProperties;
 
   return (
     <>
-      <main className="grid-layout">
-        <section className="card">
+      <main className="game-layout">
+        <section className="card side-card">
           <div className="section-heading">
-            <div className="section-title">Players</div>
-            <button className="btn btn--quiet" onClick={handleLeaveRequest}>
+            <div>
+              <div className="section-title">Players</div>
+              <div className="muted">Round {view.roundNumber}</div>
+            </div>
+            <button className="btn btn--quiet" onClick={() => setIsLeaveModalOpen(true)}>
               Leave Room
             </button>
           </div>
-          <div className="players">
-            <div className={`player ${inMatch ? "player--active-match" : ""}`}>
-              <div className="player-name">You: {view.you?.name}</div>
-              <div className="player-role">Role {yourRole}</div>
-              <div className="player-score">
-                <div className="player-metric">
-                  <span className="player-score__label">Wins</span>
-                  <span className="player-score__value">{view.scores.you}</span>
-                </div>
-                <div className="player-metric player-metric--secondary">
-                  <span className="player-score__label">Turns</span>
-                  <span className="player-turns__value">{yourTurnCount}</span>
-                </div>
-              </div>
-              {!inMatch ? (
-                <div className={`badge ${view.you?.ready ? "badge--on" : ""}`}>
-                  {view.you?.ready ? "Ready" : "Not Ready"}
-                </div>
-              ) : (
-                <div className="player-status">{getPlayerStatusLabel(view, "you")}</div>
-              )}
-            </div>
-            <div className={`player ${inMatch ? "player--active-match" : ""}`}>
-              <div className="player-name">Opponent: {view.opponent?.name ?? "Waiting..."}</div>
-              <div className="player-role">{view.opponent ? `Role ${view.opponent.role}` : "-"}</div>
-              <div className="player-score">
-                <div className="player-metric">
-                  <span className="player-score__label">Wins</span>
-                  <span className="player-score__value">{view.scores.opponent}</span>
-                </div>
-                <div className="player-metric player-metric--secondary">
-                  <span className="player-score__label">Turns</span>
-                  <span className="player-turns__value">{opponentTurnCount}</span>
-                </div>
-              </div>
-              {!inMatch ? (
-                <div className={`badge ${view.opponent?.ready ? "badge--on" : ""}`}>
-                  {view.opponent?.ready ? "Ready" : "Not Ready"}
-                </div>
-              ) : (
-                <div className="player-status">{getPlayerStatusLabel(view, "opponent")}</div>
-              )}
-            </div>
+          <div className="player-list">
+            {view.players.map((player) => (
+              <PlayerListItem
+                key={player.id}
+                player={player}
+                selfPlayerId={view.selfPlayerId}
+                turnCount={turnCounts[player.id] ?? 0}
+                nowMs={nowMs}
+                view={view}
+              />
+            ))}
           </div>
-
-          {view.status !== "in_match" ? (
-            <div className="row">
-              <button
-                className="btn primary"
-                onClick={() => actions.setReady(true)}
-                disabled={!view.opponent || Boolean(view.opponent.left) || (view.you?.ready ?? false)}
-              >
-                {!view.opponent || view.opponent.left
-                  ? "Waiting For Opponent"
-                  : view.you?.ready
-                  ? "Waiting For Opponent"
-                  : "Ready"}
-              </button>
+          <div className="status-card">
+            <div className="status-card__title">Round state</div>
+            <div className="status-card__copy">
+              {pausedPlayer
+                ? `Waiting for ${pausedPlayer.name} to reconnect.`
+                : currentTurnPlayer
+                ? `${currentTurnPlayer.id === self.id ? "Your" : `${currentTurnPlayer.name}'s`} turn.`
+                : "Round is settling."}
             </div>
-          ) : (
-            <div className="turn-indicator">
-              {view.paused ? (
-                <span className="danger">Opponent disconnected. Waiting...</span>
-              ) : view.rematch ? (
-                <span className="muted">{rematchUI.statusCopy}</span>
-              ) : isYourTurn ? (
-                <span className="accent">Your turn</span>
-              ) : (
-                <span>Opponent&apos;s turn</span>
-              )}
-            </div>
-          )}
-
-          {view.paused && view.disconnect.opponent ? (
-            <div className="row">
-              <button className="btn" onClick={actions.endTieDueDisconnect}>
-                End Match As Tie
-              </button>
-            </div>
-          ) : null}
+            {pausedPlayer?.disconnectDeadline ? (
+              <ProgressBar value={getRemainingRatio(pausedPlayer.disconnectDeadline, nowMs)} />
+            ) : null}
+          </div>
         </section>
 
         <section className="card board-card">
-          <div className="board-header">
+          <div className="section-heading">
             <div className="section-title">Your Board</div>
-            <div className="lines">Lines: {view.lines}/5</div>
+            <div className="board-meta">Lines: {view.lines}/{view.lineTarget}</div>
           </div>
-          <Board
-            board={view.board}
-            calledSet={calledSet}
-            selected={selected}
-            completedLines={view.completedLines}
-            animatedLineIds={animatedLineIds}
-            completedCellSet={completedCellSet}
-            animatedCellSet={animatedCellSet}
-            isActiveTurn={isBoardHot}
-            onSelect={(num) => {
-              if (!canPlay || calledSet.has(num)) return;
-              setSelected(num);
-            }}
-          />
-          <BingoLetters lines={view.lines} />
-          <div className="row">
+
+          <div className={`board-shell ${isYourTurn ? "board-shell--hot" : ""}`}>
+            <div className="board-grid" style={boardStyle}>
+              {view.board.map((number, index) => {
+                const called = calledSet.has(number);
+                const completed = completedCellSet.has(index);
+                const animated = animatedCellSet.has(index);
+                return (
+                  <div key={`${view.roundNumber}-${number}-${index}`} className="board-slot">
+                    <button
+                      className={`board-cell ${called ? "board-cell--called" : ""} ${
+                        completed ? "board-cell--completed" : ""
+                      } ${animated ? "board-cell--animated" : ""} ${
+                        selectedNumber === number ? "board-cell--selected" : ""
+                      }`}
+                      onClick={() => {
+                        if (!isYourTurn || called) return;
+                        setSelectedNumber(number);
+                      }}
+                      disabled={!isYourTurn || called}
+                    >
+                      {number}
+                    </button>
+                  </div>
+                );
+              })}
+              <div className="board-lines">
+                {view.completedLines.map((line) => (
+                  <BoardLine
+                    key={line.id}
+                    line={line}
+                    boardSize={view.boardSize}
+                    fresh={animatedLineIds.includes(line.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="progress-strip" style={boardStyle}>
+            {Array.from({ length: view.lineTarget }, (_, index) => (
+              <div
+                key={`progress-${index + 1}`}
+                className={`progress-pill ${index < view.lines ? "progress-pill--on" : ""}`}
+              >
+                {toRoman(index + 1)}
+              </div>
+            ))}
+          </div>
+
+          <div className="board-actions">
             <button
               className="btn primary"
-              disabled={!canPlay || selected === null}
+              disabled={!canConfirmCall}
               onClick={() => {
-                if (selected === null) return;
-                actions.confirmCall(selected);
-                setSelected(null);
+                if (selectedNumber !== null) {
+                  actions.confirmCall(selectedNumber);
+                  setSelectedNumber(null);
+                }
               }}
             >
-              Confirm
+              Confirm Call
+            </button>
+            <button className="btn danger" disabled={!canForfeit} onClick={() => setIsForfeitModalOpen(true)}>
+              Forfeit Round
             </button>
           </div>
         </section>
 
-        <section className="card timeline-panel">
-          <div className="timeline-header">
-            <div className="section-title">Match Log</div>
+        <section className="card timeline-card">
+          {rematchVote ? (
+            <div className="vote-card">
+              <div className="timeline-header">
+                <div>
+                  <div className="section-title">Rematch Vote</div>
+                  <div className="muted">
+                    {playersById[rematchVote.requesterId]?.name ?? "A player"} requested a rematch.
+                  </div>
+                </div>
+                <div className="vote-count">
+                  {Object.values(rematchVote.votes).filter((vote) => vote === "accept").length}/
+                  {rematchVote.voterIds.length} yes
+                </div>
+              </div>
+              <ProgressBar value={getRemainingRatio(rematchVote.expiresAt, nowMs)} />
+              <div className="timeline-actions">
+                {canVoteRematch ? (
+                  <>
+                    <button className="btn primary" onClick={() => actions.voteRematch("accept")}>
+                      Accept
+                    </button>
+                    <button className="btn" onClick={() => actions.voteRematch("decline")}>
+                      Decline
+                    </button>
+                  </>
+                ) : yourVote ? (
+                  <span className="muted">Your vote: {yourVote}</span>
+                ) : (
+                  <span className="muted">Voting stays open until the timer ends or everyone accepts.</span>
+                )}
+              </div>
+              <div className="vote-log">
+                {rematchVote.log.map((entry) => (
+                  <VoteLogEntry key={entry.id} entry={entry} playersById={playersById} />
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="timeline-header timeline-header--spaced">
+            <div className="section-title">Event Log</div>
+            {view.status === "in_match" && !rematchVote ? (
+              <button className="btn btn--quiet" onClick={() => actions.requestRematch()} disabled={!canRequestRematch}>
+                Request Rematch
+              </button>
+            ) : null}
           </div>
 
           <div className="timeline-stream">
             <div
               ref={logScrollRef}
               className="timeline-scroll"
-              onScroll={() => {
-                const container = logScrollRef.current;
-                if (container && isNearBottom(container)) {
+              onScroll={(event) => {
+                const container = event.currentTarget;
+                const nearBottom = isNearBottom(container);
+                wasNearBottomRef.current = nearBottom;
+                if (nearBottom) {
                   setHasUnreadLogs(false);
                 }
-                wasNearBottomRef.current = !container || isNearBottom(container);
               }}
             >
-              {view.log.length === 0 ? (
-                <div className="timeline-empty">No calls yet.</div>
+              {view.eventLog.length === 0 ? (
+                <div className="timeline-empty">No events yet.</div>
               ) : (
-                view.log.map((entry) => (
-                  <LogCard
+                view.eventLog.map((entry) => (
+                  <TimelineEntry
                     key={entry.id}
                     entry={entry}
-                    yourRole={yourRole}
-                    highlighted={highlightedLogId === entry.id}
+                    selfPlayerId={self.id}
+                    playersById={playersById}
+                    fresh={highlightedLogId === entry.id}
                   />
                 ))
               )}
             </div>
-
             {hasUnreadLogs ? (
               <button
                 className="timeline-jump-chip"
                 onClick={() => {
-                  wasNearBottomRef.current = true;
                   logScrollRef.current?.scrollTo({
                     top: logScrollRef.current.scrollHeight,
                     behavior: "smooth"
                   });
+                  wasNearBottomRef.current = true;
                   setHasUnreadLogs(false);
                 }}
               >
@@ -532,560 +696,440 @@ function GameScreen({
           </div>
 
           <div className="timeline-footer">
-            {view.status === "in_match" ? (
-              <RematchFooter
-                view={view}
-                yourRole={yourRole}
-                rematchUI={rematchUI}
-                actions={actions}
-              />
-            ) : null}
-
-            {view.status === "ended" && !isResultModalOpen ? (
-              <div className="post-match-panel">
-                <div className="section-title">Match Result</div>
-                <div className="post-match-title">{resultText.title}</div>
-                <p className="post-match-copy">{resultText.copy}</p>
-                <div className="row">
+            {view.status === "ended" ? (
+              <div className="result-footer-card">
+                <div className="result-footer-card__title">Match Result</div>
+                <div className="result-footer-card__copy">{resultPresentation.copy}</div>
+                {canReadyForNextRound ? (
                   <button
                     className="btn primary"
-                    onClick={() =>
-                      nextMatchBlocked ? actions.leaveRoom(false) : actions.setReady(true)
-                    }
-                    disabled={nextMatchBlocked ? false : view.you?.ready ?? false}
+                    onClick={() => actions.setReady(true)}
+                    disabled={self.ready || !self.connected}
                   >
-                    {nextMatchBlocked
-                      ? "Leave Room"
-                      : view.you?.ready
-                      ? "Waiting For Opponent"
-                      : "Ready For Next Match"}
+                    {self.ready ? "Ready" : "Ready For Next Match"}
                   </button>
-                </div>
+                ) : (
+                  <div className="muted">At least two connected players are required for the next round.</div>
+                )}
               </div>
-            ) : null}
+            ) : (
+              <div className="muted">
+                {pausedPlayer
+                  ? `${pausedPlayer.name} has 1 minute to reconnect before being treated as having left the room.`
+                  : activeRoundPlayers.length > 1
+                  ? `${activeRoundPlayers.length} players are still active this round.`
+                  : "Waiting for the round to resolve."}
+              </div>
+            )}
           </div>
         </section>
       </main>
 
-      {view.status === "ended" && isResultModalOpen ? (
-        <ResultModal
-          presentation={resultText}
-          onPrimaryAction={() =>
-            nextMatchBlocked ? actions.leaveRoom(false) : actions.setReady(true)
-          }
-          primaryLabel={
-            nextMatchBlocked
-              ? "Leave Room"
-              : view.you?.ready
-              ? "Waiting For Opponent"
-              : "Ready For Next Match"
-          }
-          primaryDisabled={nextMatchBlocked ? false : view.you?.ready ?? false}
-          onDismiss={() => setIsResultModalOpen(false)}
-        />
+      {view.status === "ended" && view.lastResult && isResultModalOpen ? (
+        <Modal onClose={() => setIsResultModalOpen(false)}>
+          <div className={`result-modal result-modal--${resultPresentation.kind}`}>
+            <button className="modal-close" onClick={() => setIsResultModalOpen(false)}>
+              ×
+            </button>
+            <div className="result-modal__eyebrow">Round {view.roundNumber} complete</div>
+            <h2 className="result-modal__title">{resultPresentation.title}</h2>
+            <p className="result-modal__copy">{resultPresentation.copy}</p>
+            {canReadyForNextRound ? (
+              <button
+                className="btn primary"
+                onClick={() => actions.setReady(true)}
+                disabled={self.ready || !self.connected}
+              >
+                {self.ready ? "Ready" : "Ready For Next Match"}
+              </button>
+            ) : (
+              <div className="muted">Not enough connected players remain to start another round.</div>
+            )}
+          </div>
+        </Modal>
       ) : null}
 
-      {view.status === "in_match" && isIncomingRematchModalOpen ? (
-        <ActionModal
-          title="Opponent wants a rematch"
-          body="If you accept, the current match ends as a tie and no one gets a point."
-          dismissible
-          onDismiss={() => {
-            setIsIncomingRematchModalOpen(false);
-            actions.dismissRematchPrompt();
+      {isLeaveModalOpen ? (
+        <BlockingModal
+          title="Leave this room?"
+          body={
+            view.status === "in_match"
+              ? "Leaving now permanently removes you from this room. You will be out of the current round and future rounds in this room."
+              : "Leaving now removes you from this room and returns you to the start screen."
+          }
+          primaryLabel="Leave Room"
+          onPrimary={() => {
+            actions.leaveRoom();
+            setIsLeaveModalOpen(false);
           }}
-          actions={
-            <>
-              <button className="btn primary" onClick={() => actions.respondRematch(true)}>
-                Accept
-              </button>
-              <button className="btn" onClick={() => actions.respondRematch(false)}>
-                Decline
-              </button>
-            </>
-          }
+          secondaryLabel="Continue"
+          onSecondary={() => setIsLeaveModalOpen(false)}
         />
       ) : null}
 
-      {view.status === "in_match" &&
-      view.rematch?.phase === "decision-pending" &&
-      view.rematch.requester === yourRole ? (
-        <ActionModal
-          title="Rematch declined"
-          body="Your opponent declined the rematch. Continue playing, or forfeit now and give them the point."
-          dismissible={false}
-          actions={
-            <>
-              <button className="btn" onClick={actions.continueRematch}>
-                Continue Match
-              </button>
-              <button className="btn danger" onClick={() => setIsForfeitConfirmOpen(true)}>
-                Forfeit Match
-              </button>
-            </>
+      {isForfeitModalOpen ? (
+        <BlockingModal
+          title="Forfeit this round?"
+          body={
+            activeRoundPlayers.length <= 2
+              ? "If you forfeit now, the remaining active player gets the point and the round ends."
+              : "If you forfeit now, you will be out of this round and cannot earn its point. The other active players continue."
           }
-        />
-      ) : null}
-
-      {isForfeitConfirmOpen ? (
-        <ActionModal
-          title="Confirm forfeit"
-          body="If you forfeit now, the current point is awarded to your opponent."
-          dismissible
-          onDismiss={() => setIsForfeitConfirmOpen(false)}
-          actions={
-            <>
-              <button className="btn" onClick={() => setIsForfeitConfirmOpen(false)}>
-                Go Back
-              </button>
-              <button className="btn danger" onClick={actions.forfeitRematch}>
-                Confirm Forfeit
-              </button>
-            </>
-          }
-        />
-      ) : null}
-
-      {isLeaveRoomModalOpen ? (
-        <ActionModal
-          title="Leave room?"
-          body="If you leave now, the current match is forfeited and the point goes to your opponent."
-          dismissible={false}
-          actions={
-            <>
-              <button className="btn" onClick={() => setIsLeaveRoomModalOpen(false)}>
-                Continue
-              </button>
-              <button className="btn danger" onClick={() => actions.leaveRoom(true)}>
-                Forfeit Match And Leave
-              </button>
-            </>
-          }
+          primaryLabel="Forfeit Round"
+          onPrimary={() => {
+            actions.forfeitRound();
+            setIsForfeitModalOpen(false);
+          }}
+          secondaryLabel="Continue"
+          onSecondary={() => setIsForfeitModalOpen(false)}
         />
       ) : null}
     </>
   );
 }
 
-function RematchFooter({
-  view,
-  yourRole,
-  rematchUI,
-  actions
+function PlayerListItem({
+  player,
+  selfPlayerId,
+  turnCount,
+  nowMs,
+  view
 }: {
+  player: PlayerView;
+  selfPlayerId: string;
+  turnCount: number;
+  nowMs: number;
   view: RoomView;
-  yourRole: Role | undefined;
-  rematchUI: ReturnType<typeof getRematchUI>;
-  actions: {
-    requestRematch: () => void;
-    respondRematch: (accept: boolean) => void;
-  };
 }) {
-  if (view.paused && view.disconnect.opponent) {
-    return <div className="timeline-status danger">Waiting for reconnect or match resolution.</div>;
-  }
-
-  if (!view.rematch) {
-    return (
-      <div className="timeline-actions">
-        <button className="btn" onClick={actions.requestRematch}>
-          Request Rematch
-        </button>
-      </div>
-    );
-  }
-
-  if (view.rematch.phase === "pending-response" && view.rematch.responder === yourRole) {
-    return (
-      <div className="timeline-actions">
-        <button className="btn primary" onClick={() => actions.respondRematch(true)}>
-          Accept
-        </button>
-        <button className="btn" onClick={() => actions.respondRematch(false)}>
-          Decline
-        </button>
-      </div>
-    );
-  }
-
-  return <div className="timeline-status">{rematchUI.footerCopy}</div>;
-}
-
-function Board({
-  board,
-  calledSet,
-  selected,
-  completedLines,
-  animatedLineIds,
-  completedCellSet,
-  animatedCellSet,
-  isActiveTurn,
-  onSelect
-}: {
-  board: number[];
-  calledSet: Set<number>;
-  selected: number | null;
-  completedLines: CompletedLine[];
-  animatedLineIds: string[];
-  completedCellSet: Set<number>;
-  animatedCellSet: Set<number>;
-  isActiveTurn: boolean;
-  onSelect: (num: number) => void;
-}) {
-  return (
-    <div className={`board-shell ${isActiveTurn ? "board-shell--active" : "board-shell--idle"}`}>
-      <div className="board">
-        {board.map((num, index) => {
-          const called = calledSet.has(num);
-          const isSelected = selected === num;
-          const inCompletedLine = completedCellSet.has(index);
-          const inFreshLine = animatedCellSet.has(index);
-
-          return (
-            <button
-              key={num}
-              className={[
-                "cell",
-                called ? "cell--called" : "",
-                isSelected ? "cell--selected" : "",
-                inCompletedLine ? "cell--line-member" : "",
-                inFreshLine ? "cell--line-fresh" : ""
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              onClick={() => onSelect(num)}
-              disabled={called}
-            >
-              <span className="cell__value">{num}</span>
-            </button>
-          );
-        })}
-      </div>
-      <BoardLineOverlays completedLines={completedLines} animatedLineIds={animatedLineIds} />
-    </div>
-  );
-}
-
-function BoardLineOverlays({
-  completedLines,
-  animatedLineIds
-}: {
-  completedLines: CompletedLine[];
-  animatedLineIds: string[];
-}) {
-  return (
-    <div className="board-overlays" aria-hidden="true">
-      {completedLines.map((line) => (
-        <div
-          key={line.id}
-          className={[
-            "line-overlay",
-            `line-overlay--${line.type}`,
-            animatedLineIds.includes(line.id) ? "line-overlay--fresh" : ""
-          ]
-            .filter(Boolean)
-            .join(" ")}
-          style={getLineStyle(line)}
-        />
-      ))}
-    </div>
-  );
-}
-
-function LogCard({
-  entry,
-  yourRole,
-  highlighted
-}: {
-  entry: MatchLogEntry;
-  yourRole: Role | undefined;
-  highlighted: boolean;
-}) {
-  const isYou = entry.by === yourRole;
-  const copy = getLogCopy(entry, isYou);
+  const isSelf = player.id === selfPlayerId;
+  const isCurrentTurn = view.currentTurnPlayerId === player.id && view.status === "in_match";
+  const disconnected = Boolean(!player.connected && !player.left && player.disconnectDeadline);
+  const disconnectedRatio = player.disconnectDeadline
+    ? getRemainingRatio(player.disconnectDeadline, nowMs)
+    : 0;
+  const state = getPlayerStateLabel(player, view, isCurrentTurn);
 
   return (
     <article
-      className={[
-        "timeline-entry",
-        `timeline-entry--${entry.type}`,
-        isYou ? "timeline-entry--you" : "timeline-entry--opponent",
-        highlighted ? "timeline-entry--fresh" : ""
-      ]
-        .filter(Boolean)
-        .join(" ")}
+      className={`player-tile ${player.left ? "player-tile--left" : ""} ${
+        player.currentRound.forfeited ? "player-tile--forfeited" : ""
+      } ${isCurrentTurn && !view.pausedOnPlayerId ? "player-tile--turn" : ""}`}
     >
-      <div className="timeline-entry__badge">{isYou ? "You" : "Opponent"}</div>
-      <div className="timeline-entry__copy">{copy}</div>
+      <div className="player-tile__header">
+        <div>
+          <div className="player-tile__name">{isSelf ? `You · ${player.name}` : player.name}</div>
+          <div className="player-tile__meta">Player {player.seat}</div>
+        </div>
+        {player.isHost && view.status !== "in_match" && view.status !== "ended" ? (
+          <div className="badge">Host</div>
+        ) : null}
+      </div>
+      <div className="score-strip">
+        <div className="score-strip__metric">
+          <span className="score-strip__label">Wins</span>
+          <span className="score-strip__value">{player.score}</span>
+        </div>
+        <div className="score-strip__metric score-strip__metric--secondary">
+          <span className="score-strip__label">Turns</span>
+          <span className="score-strip__value score-strip__value--secondary">{turnCount}</span>
+        </div>
+      </div>
+      <div className="player-state">{state}</div>
+      {disconnected ? <ProgressBar value={disconnectedRatio} /> : null}
     </article>
   );
 }
 
-function ResultModal({
-  presentation,
-  onPrimaryAction,
-  primaryLabel,
-  primaryDisabled,
-  onDismiss
+function TimelineEntry({
+  entry,
+  selfPlayerId,
+  playersById,
+  fresh
 }: {
-  presentation: ReturnType<typeof getResultPresentation>;
-  onPrimaryAction: () => void;
-  primaryLabel: string;
-  primaryDisabled: boolean;
-  onDismiss: () => void;
+  entry: EventLogEntry;
+  selfPlayerId: string;
+  playersById: Record<string, PlayerView>;
+  fresh: boolean;
 }) {
+  const isSelf = entry.playerId === selfPlayerId;
   return (
-    <div className="result-backdrop" onClick={onDismiss}>
-      <div
-        className={`result-modal result-modal--${presentation.theme}`}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <button
-          type="button"
-          className="result-close"
-          onClick={onDismiss}
-          aria-label="Close result popup"
-        >
-          ×
-        </button>
-        <div className="result-orb result-orb--one" />
-        <div className="result-orb result-orb--two" />
-        <div className="result-kicker">{presentation.kicker}</div>
-        <div className="result-title">{presentation.title}</div>
-        <p className="result-copy">{presentation.copy}</p>
-        <div className="row">
-          <button className="btn primary" onClick={onPrimaryAction} disabled={primaryDisabled}>
-            {primaryLabel}
-          </button>
-        </div>
+    <article
+      className={`timeline-entry ${isSelf ? "timeline-entry--self" : "timeline-entry--other"} ${
+        fresh ? "timeline-entry--fresh" : ""
+      }`}
+    >
+      <div className="timeline-entry__badge">{isSelf ? "You" : playersById[entry.playerId]?.name ?? "Player"}</div>
+      <div className="timeline-entry__copy">{formatEventLog(entry, playersById)}</div>
+    </article>
+  );
+}
+
+function VoteLogEntry({
+  entry,
+  playersById
+}: {
+  entry: RematchLogEntry;
+  playersById: Record<string, PlayerView>;
+}) {
+  const name = playersById[entry.playerId]?.name ?? "Player";
+  const copy =
+    entry.type === "request"
+      ? `${name} requested a rematch.`
+      : entry.type === "accept"
+      ? `${name} accepted.`
+      : `${name} declined.`;
+  return <div className="vote-log__entry">{copy}</div>;
+}
+
+function BoardLine({
+  line,
+  boardSize,
+  fresh
+}: {
+  line: CompletedLine;
+  boardSize: number;
+  fresh: boolean;
+}) {
+  const style = getLineStyle(line, boardSize);
+  return <div className={`board-line ${fresh ? "board-line--fresh" : ""}`} style={style} />;
+}
+
+function Modal({ onClose, children }: { onClose: () => void; children: ReactNode }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        {children}
       </div>
     </div>
   );
 }
 
-function ActionModal({
+function BlockingModal({
   title,
   body,
-  actions,
-  dismissible,
-  onDismiss
+  primaryLabel,
+  secondaryLabel,
+  onPrimary,
+  onSecondary
 }: {
   title: string;
   body: string;
-  actions: ReactNode;
-  dismissible: boolean;
-  onDismiss?: () => void;
+  primaryLabel: string;
+  secondaryLabel: string;
+  onPrimary: () => void;
+  onSecondary: () => void;
 }) {
   return (
-    <div
-      className="dialog-backdrop"
-      onClick={dismissible ? onDismiss : undefined}
-      aria-hidden={dismissible ? undefined : true}
-    >
-      <div className="dialog-modal" onClick={(event) => event.stopPropagation()}>
-        {dismissible ? (
-          <button
-            type="button"
-            className="result-close"
-            onClick={onDismiss}
-            aria-label="Close dialog"
-          >
-            ×
+    <div className="modal-backdrop modal-backdrop--blocking">
+      <div className="modal-card modal-card--confirm">
+        <h2 className="modal-title">{title}</h2>
+        <p className="modal-copy">{body}</p>
+        <div className="row">
+          <button className="btn primary" onClick={onPrimary}>
+            {primaryLabel}
           </button>
-        ) : null}
-        <div className="dialog-title">{title}</div>
-        <p className="dialog-copy">{body}</p>
-        <div className="row">{actions}</div>
+          <button className="btn" onClick={onSecondary}>
+            {secondaryLabel}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-function BingoLetters({ lines }: { lines: number }) {
-  const letters = ["B", "I", "N", "G", "O"];
-
+function ProgressBar({ value }: { value: number }) {
   return (
-    <div className="bingo">
-      {letters.map((letter, idx) => (
-        <div key={letter} className={`bingo-letter ${lines > idx ? "on" : ""}`}>
-          <span className="bingo-letter__glow" />
-          <span className="bingo-letter__text">{letter}</span>
-        </div>
-      ))}
+    <div className="progress-bar">
+      <div className="progress-bar__fill" style={{ width: `${Math.max(0, Math.min(1, value)) * 100}%` }} />
     </div>
   );
 }
 
-function getLineStyle(line: CompletedLine) {
+function getSelfPlayer(view: RoomView) {
+  return view.players.find((player) => player.id === view.selfPlayerId)!;
+}
+
+function useNowTick() {
+  const [tick, setTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setTick(Date.now()), 250);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  return tick;
+}
+
+function getTurnCounts(entries: EventLogEntry[]) {
+  return entries.reduce<Record<string, number>>((acc, entry) => {
+    if (entry.type !== "call") return acc;
+    acc[entry.playerId] = (acc[entry.playerId] ?? 0) + 1;
+    return acc;
+  }, {});
+}
+
+function getPlayerStateLabel(player: PlayerView, view: RoomView, isCurrentTurn: boolean) {
+  if (player.left) return "Left room";
+  if (!player.connected && player.disconnectDeadline) return "Disconnected · waiting";
+  if (view.status === "in_match") {
+    if (player.currentRound.forfeited) return "Forfeited this round";
+    if (player.currentRound.active && isCurrentTurn && !view.pausedOnPlayerId) {
+      return player.id === view.selfPlayerId ? "Your turn" : "Turn";
+    }
+    if (player.currentRound.active) return "Active";
+    return "Waiting";
+  }
+  if (view.status === "ended") {
+    return player.ready ? "Ready" : "Waiting";
+  }
+  return player.isHost ? "Host" : "Joined";
+}
+
+function getResultPresentation(
+  result: MatchResult,
+  selfPlayerId: string,
+  playersById: Record<string, PlayerView>
+) {
+  if (!result) {
+    return {
+      kind: "neutral",
+      title: "Round complete",
+      copy: "Prepare for the next round."
+    };
+  }
+
+  if (result.trigger === "empty") {
+    return {
+      kind: "neutral",
+      title: "Round ended",
+      copy: "No active players remained in the round."
+    };
+  }
+
+  const awardedNames = result.awardedPointIds.map((playerId) => playersById[playerId]?.name ?? "Player");
+  const youScored = result.awardedPointIds.includes(selfPlayerId);
+
+  if (result.awardedPointIds.length > 1) {
+    const everyoneTied =
+      result.activePlayerIds.length > 0 &&
+      result.awardedPointIds.length === result.activePlayerIds.length;
+    return {
+      kind: youScored ? "tie" : "loss",
+      title: everyoneTied ? "Full tie" : "Shared win",
+      copy: everyoneTied
+        ? `${awardedNames.join(", ")} all reached the line target together.`
+        : `${awardedNames.join(", ")} reached the target on the same call.`
+    };
+  }
+
+  if (youScored) {
+    return {
+      kind: "win",
+      title: "You win",
+      copy:
+        result.trigger === "last-player"
+          ? "You were the last active player remaining in the round."
+          : "You reached the target line count first."
+    };
+  }
+
+  return {
+    kind: "loss",
+    title: `${awardedNames[0] ?? "A player"} wins`,
+    copy:
+      result.trigger === "last-player"
+        ? `${awardedNames[0] ?? "A player"} was the last active player remaining.`
+        : `${awardedNames[0] ?? "A player"} reached the target line count first.`
+  };
+}
+
+function formatEventLog(entry: EventLogEntry, playersById: Record<string, PlayerView>) {
+  const name = playersById[entry.playerId]?.name ?? "Player";
+
+  switch (entry.type) {
+    case "call":
+      return `called ${entry.number}`;
+    case "disconnect":
+      return `${name} disconnected.`;
+    case "reconnect":
+      return `${name} reconnected.`;
+    case "left-room":
+      return `${name} left the room.`;
+    case "timeout-left":
+      return `${name} did not return in time and is now treated as having left the room.`;
+    case "forfeit":
+      return `${name} forfeited this round.`;
+    default:
+      return "Event";
+  }
+}
+
+function getRemainingRatio(deadline: number, nowMs: number) {
+  const totalWindow = 60_000;
+  return Math.max(0, Math.min(1, (deadline - nowMs) / totalWindow));
+}
+
+function isNearBottom(element: HTMLDivElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= LOG_BOTTOM_THRESHOLD;
+}
+
+function toRoman(value: number) {
+  const numerals = [
+    [1000, "M"],
+    [900, "CM"],
+    [500, "D"],
+    [400, "CD"],
+    [100, "C"],
+    [90, "XC"],
+    [50, "L"],
+    [40, "XL"],
+    [10, "X"],
+    [9, "IX"],
+    [5, "V"],
+    [4, "IV"],
+    [1, "I"]
+  ] as const;
+
+  let remaining = value;
+  let result = "";
+  numerals.forEach(([amount, numeral]) => {
+    while (remaining >= amount) {
+      result += numeral;
+      remaining -= amount;
+    }
+  });
+  return result;
+}
+
+function getLineStyle(line: CompletedLine, boardSize: number): CSSProperties {
+  const step = 100 / boardSize;
+  const center = (index: number) => `${(index + 0.5) * step}%`;
+
   if (line.type === "row") {
     return {
-      top: `calc(${(line.index + 0.5) * 20}% - 3px)`,
-      left: "2%",
-      width: "96%",
-      height: "6px"
+      left: "0%",
+      top: center(line.index),
+      width: "100%",
+      height: "6px",
+      transform: "translateY(-50%)"
     };
   }
 
   if (line.type === "col") {
     return {
-      top: "2%",
-      left: `calc(${(line.index + 0.5) * 20}% - 3px)`,
+      left: center(line.index),
+      top: "0%",
       width: "6px",
-      height: "96%"
+      height: "100%",
+      transform: "translateX(-50%)"
     };
   }
 
   return {
-    top: "50%",
     left: "50%",
-    width: "136%",
+    top: "50%",
+    width: "141.5%",
     height: "6px",
-    transform:
-      line.index === 0
-        ? "translate(-50%, -50%) rotate(45deg)"
-        : "translate(-50%, -50%) rotate(-45deg)"
+    transform: `translate(-50%, -50%) rotate(${line.index === 0 ? 45 : -45}deg)`
   };
-}
-
-function getResultPresentation(result: MatchResult, yourRole: Role | undefined) {
-  if (!result) {
-    return {
-      kicker: "Match Over",
-      title: "Round complete",
-      copy: "Get ready for the next match.",
-      theme: "tie" as const
-    };
-  }
-
-  if (result.type === "tie") {
-    return {
-      kicker: "Tie Game",
-      title: "Dead even",
-      copy: "Both boards hit the finish together. Reset when both players are ready.",
-      theme: "tie" as const
-    };
-  }
-
-  const youWon = result.winnerRole === yourRole;
-  if (result.type === "forfeit") {
-    return youWon
-      ? {
-          kicker: "Forfeit Win",
-          title: "You take the point",
-          copy: "The match ended early in your favor. Ready up when you want the next board.",
-          theme: "win" as const
-        }
-      : {
-          kicker: "Forfeit Loss",
-          title: "Point conceded",
-          copy: "This round counts for your opponent. Ready up for the next board.",
-          theme: "loss" as const
-        };
-  }
-
-  return youWon
-    ? {
-        kicker: "Victory",
-        title: "You win",
-        copy: "Five lines locked in. The next round is ready when both players are.",
-        theme: "win" as const
-      }
-    : {
-        kicker: "Defeat",
-        title: "You lost",
-        copy: "Your opponent reached five lines first. Ready up to start a fresh board.",
-        theme: "loss" as const
-      };
-}
-
-function getRematchUI(view: RoomView, yourRole: Role | undefined) {
-  if (!view.rematch || !yourRole) {
-    return {
-      statusCopy: "",
-      footerCopy: ""
-    };
-  }
-
-  if (view.rematch.phase === "pending-response") {
-    if (view.rematch.requester === yourRole) {
-      return {
-        statusCopy: "Waiting for opponent to respond to your rematch request.",
-        footerCopy: "Waiting for opponent to respond."
-      };
-    }
-    return {
-      statusCopy: "Opponent requested a rematch.",
-      footerCopy: "Choose whether to accept a tie or keep the current match alive."
-    };
-  }
-
-  if (view.rematch.requester === yourRole) {
-    return {
-      statusCopy: "Your rematch was declined. Choose continue or forfeit.",
-      footerCopy: "Decision required in the popup."
-    };
-  }
-
-  return {
-    statusCopy: "Waiting for opponent to decide whether to continue or forfeit.",
-    footerCopy: "Waiting for opponent's response."
-  };
-}
-
-function getLogCopy(entry: MatchLogEntry, isYou: boolean) {
-  switch (entry.type) {
-    case "call":
-      return `${isYou ? "called" : "called"} ${entry.number}`;
-    case "rematch-requested":
-      return `${isYou ? "requested a rematch" : "requested a rematch"}`;
-    case "rematch-accepted":
-      return `${isYou ? "accepted the rematch" : "accepted the rematch"}`;
-    case "rematch-declined":
-      return `${isYou ? "declined the rematch" : "declined the rematch"}`;
-    case "rematch-continued":
-      return `${isYou ? "continued the match" : "continued the match"}`;
-    case "rematch-forfeited":
-      return `${isYou ? "forfeited the match" : "forfeited the match"}`;
-    case "left-room":
-      return `${isYou ? "left the room" : "left the room"}`;
-    case "disconnect":
-      return `${isYou ? "went offline" : "went offline"}`;
-    case "reconnect":
-      return `${isYou ? "reconnected" : "reconnected"}`;
-    default:
-      return "updated the match";
-  }
-}
-
-function isNearBottom(container: HTMLDivElement) {
-  return (
-    container.scrollHeight - container.scrollTop - container.clientHeight <
-    LOG_BOTTOM_THRESHOLD
-  );
-}
-
-function getPlayerStatusLabel(view: RoomView, side: "you" | "opponent") {
-  if (view.status !== "in_match") {
-    return side === "you"
-      ? view.you?.ready
-        ? "Ready"
-        : "Not Ready"
-      : view.opponent?.ready
-      ? "Ready"
-      : "Not Ready";
-  }
-
-  if (side === "opponent" && view.opponent?.left) {
-    return "Left room";
-  }
-
-  if (view.paused) {
-    return side === "you" ? "Waiting on reconnect" : "Disconnected";
-  }
-
-  if (view.rematch) {
-    return side === "you" ? "Match decision pending" : "Match decision pending";
-  }
-
-  return side === "you" ? "Playing" : "Playing";
 }
