@@ -379,10 +379,12 @@ function RoundScreen({ view, actions }: { view: RoomView; actions: GameActions }
   const canForfeit = view.status === "in_match" && self.currentRound.active && !self.left;
   const rematchVote = view.rematchVote;
   const yourVote = rematchVote?.votes[self.id];
+  const isRoundEligibleForRematch =
+    view.status === "in_match" && self.currentRound.active && !self.currentRound.forfeited && !self.left;
   const canVoteRematch =
-    view.status === "in_match" &&
-    Boolean(rematchVote && rematchVote.voterIds.includes(self.id) && !yourVote && !self.left);
-  const canRequestRematch = view.status === "in_match" && !rematchVote && !self.left;
+    isRoundEligibleForRematch &&
+    Boolean(rematchVote && rematchVote.voterIds.includes(self.id) && !yourVote);
+  const canRequestRematch = isRoundEligibleForRematch && !rematchVote;
   const readyEligiblePlayers = view.players.filter((player) => !player.left);
   const canReadyForNextRound = view.status === "ended" && readyEligiblePlayers.length >= 2 && !self.left;
   const turnCounts = useMemo(() => getTurnCounts(view.eventLog), [view.eventLog]);
@@ -483,7 +485,11 @@ function RoundScreen({ view, actions }: { view: RoomView; actions: GameActions }
   }, [view.eventLog]);
 
   const boardStyle = {
-    "--board-size": String(view.boardSize)
+    "--board-size": String(view.boardSize),
+    "--cell-padding": view.boardSize >= 7 ? "4px" : view.boardSize === 6 ? "5px" : "6px",
+    "--cell-font-size": view.boardSize >= 7 ? "clamp(14px, 2.3vw, 20px)" : view.boardSize === 6 ? "clamp(16px, 2.8vw, 24px)" : "clamp(20px, 4vw, 28px)",
+    "--progress-padding": view.boardSize >= 7 ? "12px 4px" : view.boardSize === 6 ? "14px 6px" : "16px 8px",
+    "--progress-font-size": view.boardSize >= 7 ? "12px" : view.boardSize === 6 ? "13px" : "14px"
   } as CSSProperties;
 
   return (
@@ -813,7 +819,9 @@ function PlayerListItem({
     <article
       className={`player-tile ${player.left ? "player-tile--left" : ""} ${
         player.currentRound.forfeited ? "player-tile--forfeited" : ""
-      } ${isCurrentTurn && !view.pausedOnPlayerId ? "player-tile--turn" : ""}`}
+      } ${disconnected ? "player-tile--disconnected" : ""} ${
+        isCurrentTurn && !view.pausedOnPlayerId ? "player-tile--turn" : ""
+      }`}
     >
       <div className="player-tile__header">
         <div>
@@ -834,8 +842,8 @@ function PlayerListItem({
           <span className="score-strip__value score-strip__value--secondary">{turnCount}</span>
         </div>
       </div>
-      <div className="player-state">{state}</div>
-      {disconnected ? <ProgressBar value={disconnectedRatio} /> : null}
+      <div className={`player-state ${disconnected ? "player-state--disconnected" : ""}`}>{state}</div>
+      {disconnected ? <ProgressBar value={disconnectedRatio} tone="danger" /> : null}
     </article>
   );
 }
@@ -937,9 +945,9 @@ function BlockingModal({
   );
 }
 
-function ProgressBar({ value }: { value: number }) {
+function ProgressBar({ value, tone = "accent" }: { value: number; tone?: "accent" | "danger" }) {
   return (
-    <div className="progress-bar">
+    <div className={`progress-bar progress-bar--${tone}`}>
       <div className="progress-bar__fill" style={{ width: `${Math.max(0, Math.min(1, value)) * 100}%` }} />
     </div>
   );
@@ -1104,13 +1112,14 @@ function toRoman(value: number) {
 function getLineStyle(line: CompletedLine, boardSize: number): CSSProperties {
   const step = 100 / boardSize;
   const center = (index: number) => `${(index + 0.5) * step}%`;
+  const thickness = boardSize >= 7 ? "4px" : boardSize === 6 ? "5px" : "6px";
 
   if (line.type === "row") {
     return {
       left: "0%",
       top: center(line.index),
       width: "100%",
-      height: "6px",
+      height: thickness,
       transform: "translateY(-50%)"
     };
   }
@@ -1119,7 +1128,7 @@ function getLineStyle(line: CompletedLine, boardSize: number): CSSProperties {
     return {
       left: center(line.index),
       top: "0%",
-      width: "6px",
+      width: thickness,
       height: "100%",
       transform: "translateX(-50%)"
     };
@@ -1129,7 +1138,7 @@ function getLineStyle(line: CompletedLine, boardSize: number): CSSProperties {
     left: "50%",
     top: "50%",
     width: "141.5%",
-    height: "6px",
+    height: thickness,
     transform: `translate(-50%, -50%) rotate(${line.index === 0 ? 45 : -45}deg)`
   };
 }

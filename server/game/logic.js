@@ -480,8 +480,18 @@ export function createRematchVote(room, playerId) {
   if (!player || player.left) {
     return { ok: false, error: "Only room participants can request a rematch." };
   }
+  if (!room.round.activePlayerIds.includes(playerId)) {
+    return { ok: false, error: "Only active round participants can request a rematch." };
+  }
+  if (room.round.forfeitedPlayerIds.includes(playerId)) {
+    return { ok: false, error: "Players who already forfeited this round cannot request a rematch." };
+  }
 
-  const voterIds = getNonLeftPlayers(room).map((roomPlayer) => roomPlayer.id);
+  const forfeitedIds = new Set(room.round.forfeitedPlayerIds);
+  const activeIds = new Set(room.round.activePlayerIds);
+  const voterIds = getNonLeftPlayers(room)
+    .filter((roomPlayer) => activeIds.has(roomPlayer.id) && !forfeitedIds.has(roomPlayer.id))
+    .map((roomPlayer) => roomPlayer.id);
   room.rematchVote = {
     requesterId: playerId,
     startedAt: now(),

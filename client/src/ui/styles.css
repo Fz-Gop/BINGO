@@ -318,13 +318,19 @@ h1 {
 }
 
 .player-tile--turn {
-  border-color: rgba(15, 118, 110, 0.28);
-  box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.12) inset;
+  border-color: rgba(15, 118, 110, 0.34);
+  box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.14) inset;
+}
+
+.player-tile--disconnected {
+  border-color: rgba(185, 28, 28, 0.28);
+  background: rgba(255, 245, 245, 0.9);
 }
 
 .player-tile--left {
-  filter: grayscale(0.95);
-  opacity: 0.72;
+  border-color: rgba(107, 114, 128, 0.26);
+  background: rgba(226, 232, 240, 0.9);
+  box-shadow: none;
 }
 
 .player-tile--forfeited {
@@ -342,6 +348,21 @@ h1 {
 .player-tile__name {
   font-size: 18px;
   font-weight: 800;
+}
+
+.player-tile--left .player-tile__name {
+  color: #4b5563;
+}
+
+.player-tile--left .player-tile__meta,
+.player-tile--left .player-state,
+.player-tile--left .score-strip__label {
+  color: #6b7280;
+}
+
+.player-tile--left .score-strip__value,
+.player-tile--left .score-strip__value--secondary {
+  color: #4b5563;
 }
 
 .player-tile__meta,
@@ -390,6 +411,10 @@ h1 {
   color: var(--muted);
 }
 
+.player-state--disconnected {
+  color: var(--danger);
+}
+
 .progress-bar {
   width: 100%;
   height: 6px;
@@ -402,6 +427,14 @@ h1 {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #1a8278, #0f766e);
+}
+
+.progress-bar--danger {
+  background: rgba(185, 28, 28, 0.12);
+}
+
+.progress-bar--danger .progress-bar__fill {
+  background: linear-gradient(90deg, #dc2626, #b91c1c);
 }
 
 .game-layout {
@@ -440,15 +473,21 @@ h1 {
 }
 
 .board-shell--hot {
-  border-color: rgba(15, 118, 110, 0.28);
+  border-color: rgba(15, 118, 110, 0.36);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.76)),
-    linear-gradient(180deg, rgba(15, 118, 110, 0.055), rgba(15, 118, 110, 0.028));
-  box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.1) inset;
+    linear-gradient(135deg, rgba(204, 236, 231, 0.52) 0%, rgba(233, 247, 244, 0.26) 28%, rgba(255, 255, 255, 0.92) 72%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(245, 251, 250, 0.88));
+  box-shadow:
+    0 0 0 1px rgba(15, 118, 110, 0.12) inset,
+    0 10px 22px rgba(15, 118, 110, 0.05);
 }
 
 .board-grid {
   --board-size: 5;
+  --cell-padding: 6px;
+  --cell-font-size: clamp(20px, 4vw, 28px);
+  --progress-padding: 16px 8px;
+  --progress-font-size: 14px;
   position: relative;
   display: grid;
   grid-template-columns: repeat(var(--board-size), 1fr);
@@ -459,7 +498,7 @@ h1 {
 }
 
 .board-slot {
-  padding: 6px;
+  padding: var(--cell-padding);
 }
 
 .board-cell {
@@ -468,7 +507,7 @@ h1 {
   border-radius: 22px;
   border: 1px solid rgba(0, 0, 0, 0.08);
   background: rgba(255, 255, 255, 0.82);
-  font-size: clamp(20px, 4vw, 28px);
+  font-size: var(--cell-font-size);
   font-weight: 900;
   cursor: pointer;
   position: relative;
@@ -519,12 +558,13 @@ h1 {
 }
 
 .progress-pill {
-  padding: 16px 8px;
+  padding: var(--progress-padding);
   border-radius: 18px;
   border: 1px solid rgba(15, 118, 110, 0.22);
   background: linear-gradient(180deg, rgba(236, 251, 250, 0.9), rgba(214, 240, 237, 0.75));
   text-align: center;
   font-weight: 900;
+  font-size: var(--progress-font-size);
   color: #446f6a;
 }
 
